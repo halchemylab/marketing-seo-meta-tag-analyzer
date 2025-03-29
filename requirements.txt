@@ -1,0 +1,5 @@
+streamlit>=1.10.0
+requests>=2.25.1
+beautifulsoup4>=4.9.3
+textstat>=0.7.3
+lxml>=4.9.0  # Optional but recommended parser for BeautifulSoup
