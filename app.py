@@ -59,6 +59,7 @@ if st.button("Analyze URL", key="analyze_button"):
         tech_data = results["tech_data"]
         tech_score = results["tech_score"]
         overall_score = results["overall_score"]
+        issues = results["issues"]
 
         if url_input.lower() != final_url.lower():
             st.info(f"Note: URL redirected to: {final_url}")
@@ -69,6 +70,18 @@ if st.button("Analyze URL", key="analyze_button"):
         st.progress(int(overall_score) / 100)
         st.metric(label="Overall Score", value=f"{overall_score:.1f}%")
         st.markdown("---")
+
+        if issues:
+            st.subheader("Priority Fixes")
+            severity_icons = {"high": "❌", "medium": "⚠️", "low": "ℹ️"}
+            for issue in issues[:5]:
+                st.markdown(
+                    f"{severity_icons.get(issue['severity'], 'ℹ️')} "
+                    f"**[{issue['severity'].upper()}] {issue['message']}** "
+                    f"{issue['recommendation'] or ''}"
+                )
+            st.caption("These recommendations are generated from validated checks and heuristic rules in the current analyzer.")
+            st.markdown("---")
 
         st.subheader("📊 Score Breakdown")
         col1, col2, col3, col4 = st.columns(4)
@@ -100,33 +113,31 @@ if st.button("Analyze URL", key="analyze_button"):
                 display_metric_card(
                     "Title Tag",
                     meta_data.get("title") or "Missing",
-                    "good" if meta_data.get("title") else "bad",
+                    "good" if meta_data.get("title_status") == "good" else ("warning" if meta_data.get("title") else "bad"),
                     "The main title shown in search results and browser tabs.",
                 )
                 display_metric_card(
                     "Meta Description",
                     meta_data.get("description") or "Missing",
-                    "good" if meta_data.get("description") else "warning",
+                    "good" if meta_data.get("description_status") == "good" else ("warning" if meta_data.get("description") else "bad"),
                     "Summary shown below the title in search results.",
                 )
                 display_metric_card(
                     "Canonical URL",
                     meta_data.get("canonical") or "Missing",
-                    "good" if meta_data.get("canonical") else "warning",
+                    "good" if meta_data.get("canonical_status") == "good" else ("warning" if meta_data.get("canonical") else "bad"),
                     "Specifies the preferred version of this page.",
                 )
                 display_metric_card(
                     "Robots Meta Tag",
                     meta_data.get("robots") or "Default (index, follow)",
-                    "info",
+                    "good" if meta_data.get("robots_status") == "valid" else ("warning" if meta_data.get("robots") else "info"),
                     "Instructions for search engine crawlers (e.g., 'noindex').",
                 )
                 display_metric_card(
                     "Viewport Tag",
                     meta_data.get("viewport") or "Missing",
-                    "good"
-                    if meta_data.get("viewport") and "width=device-width" in meta_data.get("viewport")
-                    else "bad",
+                    "good" if meta_data.get("viewport_status") == "good" else ("warning" if meta_data.get("viewport") else "bad"),
                     "Essential for making the page responsive on mobile devices.",
                 )
             with col_m2:
@@ -356,13 +367,13 @@ if st.button("Analyze URL", key="analyze_button"):
                 lt_status = tech_data["load_time_status"]
                 lt_text = f"{tech_data['load_time']:.2f} seconds" if tech_data["load_time"] is not None else "Error"
                 lt_desc = "Good" if lt_status == "good" else ("Okay" if lt_status == "warning" else ("Slow" if lt_status == "bad" else "Error"))
-                st.markdown(f"**{get_status_icon(lt_status)} Page Load Time:** {lt_text} ({lt_desc})")
-                st.caption("Based on server response time. Actual user experience may vary.")
+                st.markdown(f"**{get_status_icon(lt_status)} Server Fetch Time:** {lt_text} ({lt_desc})")
+                st.caption("This is a server-side fetch measurement, not a Core Web Vitals or real-user performance metric.")
 
                 mf_status = tech_data["mobile_friendly"]["status"]
-                mf_text = "Likely Mobile-Friendly" if mf_status == "good" else ("Potential Issues" if mf_status == "warning" else "Not Mobile-Friendly")
-                st.markdown(f"**{get_status_icon(mf_status)} Mobile-Friendly Check:** {mf_text}")
-                st.caption(f"({tech_data['mobile_friendly']['reason']}) - Based on viewport tag presence.")
+                mf_text = "Responsive Viewport Detected" if mf_status == "good" else ("Viewport Needs Review" if mf_status == "warning" else "No Responsive Viewport Signal")
+                st.markdown(f"**{get_status_icon(mf_status)} Mobile Viewport Hint:** {mf_text}")
+                st.caption(f"({tech_data['mobile_friendly']['reason']}) This is a viewport-based heuristic, not a rendered mobile usability test.")
 
             with col_t2:
                 rb_status = tech_data["robots_txt"]["status"]
@@ -395,4 +406,4 @@ if st.button("Analyze URL", key="analyze_button"):
             )
 
 st.markdown("---")
-st.caption("Disclaimer: This tool provides a basic automated analysis. SEO is complex and requires manual review and strategy. Scores are indicative and based on common best practices.")
+st.caption("Disclaimer: This tool mixes validated HTML checks with heuristic SEO signals. Use the score as a guide, not a substitute for manual review or rendered-page testing.")

@@ -1,6 +1,6 @@
 # 📊 Comprehensive SEO Meta Tag Analyzer
 
-A powerful Streamlit-based web application that provides comprehensive SEO analysis for any webpage. This tool helps marketers, developers, and SEO specialists analyze and optimize their web pages by providing detailed insights into various SEO aspects.
+A Streamlit-based web application for inspecting SEO-relevant HTML signals on a webpage. It is best used as a fast heuristic checker for metadata, content structure, links, and selected technical signals.
 
 ## 🚀 Features
 
@@ -29,12 +29,17 @@ A powerful Streamlit-based web application that provides comprehensive SEO analy
 
 ### Technical SEO
 - HTTPS security check
-- Page load time measurement
-- Mobile-friendliness validation
+- Server-side fetch time measurement
+- Viewport-based mobile hint
 - robots.txt verification
 - sitemap.xml detection
 - Schema markup (Structured Data) validation
 - Viewport configuration check
+
+### Prioritized Findings
+- Structured issue list with severity and recommended fixes
+- Validation-aware checks for title, description, canonical, robots, schema, and viewport
+- Regression-tested handling for DOM mutation, malformed schema, and same-site subdomain links
 
 ## 📋 Requirements
 
@@ -70,7 +75,7 @@ streamlit run app.py
 
 3. Enter any webpage URL to analyze
 
-4. Review the comprehensive analysis across all SEO aspects
+4. Review the score, structured findings, and detailed analysis tabs
 
 ## 📊 Analysis Categories
 
@@ -101,18 +106,26 @@ The tool provides scores and insights in four main categories:
 ## 🎯 Scoring System
 
 The tool uses a weighted scoring system to calculate the overall SEO score:
-- Scores are calculated based on industry best practices
+- Scores are derived from rule-based HTML checks and heuristic signals
 - Each category has specific scoring criteria
 - The final score is weighted based on the importance of each category
-- Scores range from 0-100, with higher scores indicating better SEO optimization
+- Scores range from 0-100, but should be treated as indicative rather than authoritative
 
 ## ⚠️ Limitations
 
-- The tool performs basic analysis without live link checking
-- Load time measurements are server-side only
-- Mobile-friendliness check is based on viewport configuration
-- Some advanced SEO factors require manual review
+- The tool analyzes fetched HTML and does not execute JavaScript-rendered content
+- Load time is measured from the analyzer server and is not a real-user performance metric
+- Mobile analysis is based on viewport configuration, not rendered layout or device testing
+- Some checks are validated HTML rules, while others remain heuristics
 - Duplicate content detection is limited to canonical tag checking
+- Live broken-link validation is not performed
+
+## ✅ Accuracy Notes
+
+- Strongest signals: tag presence, canonical formatting, robots.txt lookup, sitemap detection, schema parsing, and heading/image/link extraction from static HTML
+- Weaker signals: readability, keyword density, score weighting, server fetch time, and viewport-based mobile interpretation
+- Best fit: server-rendered or mostly static pages
+- Lower confidence: JavaScript-heavy pages where important content is injected after initial HTML
 
 ## 📜 License
 
