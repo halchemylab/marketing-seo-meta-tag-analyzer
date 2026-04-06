@@ -81,8 +81,16 @@ def normalize_netloc(netloc):
     return netloc.lower().split(":")[0].removeprefix("www.")
 
 
+def site_key(netloc):
+    normalized = normalize_netloc(netloc)
+    parts = normalized.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return normalized
+
+
 def is_same_site(url_a, url_b):
-    return normalize_netloc(get_domain(url_a)) == normalize_netloc(get_domain(url_b))
+    return site_key(get_domain(url_a)) == site_key(get_domain(url_b))
 
 
 def validate_length(text, min_length, max_length):
@@ -141,6 +149,16 @@ def extract_schema_types(schema_json):
         for item in schema_json:
             schema_types.extend(extract_schema_types(item))
     return schema_types
+
+
+def build_issue(category, severity, message, evidence=None, recommendation=None):
+    return {
+        "category": category,
+        "severity": severity,
+        "message": message,
+        "evidence": evidence or {},
+        "recommendation": recommendation,
+    }
 
 
 def clean_text(text):
@@ -508,7 +526,7 @@ def analyze_links(soup, base_url):
             continue
 
         link_domain = get_domain(full_url)
-        if normalize_netloc(link_domain) == normalize_netloc(base_domain):
+        if site_key(link_domain) == site_key(base_domain):
             link_data["internal"].append(full_url)
             link_data["internal_count"] += 1
             link_info["type"] = "internal"
@@ -675,6 +693,99 @@ def analyze_technical_seo(url, soup, load_time, meta_data):
     return tech_data, tech_score, warnings
 
 
+def generate_issues(meta_data, content_data, link_data, tech_data):
+    issues = []
+
+    if meta_data["title_status"] == "missing":
+        issues.append(build_issue("meta", "high", "Title tag is missing.", recommendation="Add a unique title tag."))
+    elif meta_data["title_status"] == "short":
+        issues.append(build_issue("meta", "medium", "Title tag is too short.", evidence={"title": meta_data["title"]}, recommendation="Expand the title to better describe the page intent."))
+    elif meta_data["title_status"] == "long":
+        issues.append(build_issue("meta", "medium", "Title tag is too long.", evidence={"title": meta_data["title"]}, recommendation="Trim the title to reduce truncation risk in search results."))
+
+    if meta_data["description_status"] == "missing":
+        issues.append(build_issue("meta", "high", "Meta description is missing.", recommendation="Add a descriptive meta description."))
+    elif meta_data["description_status"] in {"short", "long"}:
+        issues.append(build_issue("meta", "medium", f"Meta description is {meta_data['description_status']}.", evidence={"description": meta_data["description"]}, recommendation="Adjust the meta description length to fit common search snippet ranges."))
+
+    if meta_data["canonical_status"] == "missing":
+        issues.append(build_issue("meta", "medium", "Canonical tag is missing.", recommendation="Add a self-referencing canonical URL when appropriate."))
+    elif meta_data["canonical_status"] == "invalid":
+        issues.append(build_issue("meta", "high", "Canonical URL is invalid.", evidence={"canonical": meta_data["canonical"]}, recommendation="Use an absolute canonical URL without fragments."))
+    elif meta_data["canonical_status"] == "cross_domain":
+        issues.append(build_issue("meta", "medium", "Canonical URL points to a different site.", evidence={"canonical": meta_data["canonical"]}, recommendation="Verify that the cross-domain canonical is intentional."))
+
+    if meta_data["robots_status"] == "conflict":
+        issues.append(build_issue("meta", "high", "Robots meta tag contains conflicting directives.", evidence={"robots": meta_data["robots"]}, recommendation="Remove contradictory robots directives."))
+    elif meta_data["robots_status"] == "restrictive":
+        issues.append(build_issue("meta", "medium", "Robots meta tag contains restrictive directives.", evidence={"robots": meta_data["robots"]}, recommendation="Confirm that `noindex` or `nofollow` is intentional."))
+
+    if meta_data["viewport_status"] == "missing":
+        issues.append(build_issue("technical", "high", "Viewport tag is missing.", recommendation="Add a responsive viewport meta tag."))
+    elif meta_data["viewport_status"] == "invalid":
+        issues.append(build_issue("technical", "high", "Viewport tag is invalid.", evidence={"viewport": meta_data["viewport"]}, recommendation="Use `width=device-width, initial-scale=1`."))
+    elif meta_data["viewport_status"] == "partial":
+        issues.append(build_issue("technical", "medium", "Viewport tag is incomplete.", evidence={"viewport": meta_data["viewport"]}, recommendation="Include both `width=device-width` and `initial-scale=1`."))
+
+    if len(content_data["headings"].get("h1", [])) == 0:
+        issues.append(build_issue("content", "high", "No H1 heading was found.", recommendation="Add a single primary H1 heading to the page."))
+    elif len(content_data["headings"].get("h1", [])) > 1:
+        issues.append(build_issue("content", "medium", "Multiple H1 headings were found.", evidence={"h1_count": len(content_data["headings"].get("h1", []))}, recommendation="Consolidate to one primary H1 where possible."))
+
+    if content_data["word_count"] < MIN_CONTENT_LENGTH_WORDS:
+        issues.append(build_issue("content", "medium", "Main content is thin.", evidence={"word_count": content_data["word_count"]}, recommendation="Expand the main body content if the page is intended to rank organically."))
+
+    missing_alt = content_data["image_alt_analysis"]["missing_alt"]
+    if missing_alt > 0:
+        issues.append(build_issue("content", "medium", "Some images are missing alt text.", evidence={"missing_alt": missing_alt}, recommendation="Add meaningful alt text to informative images."))
+
+    if link_data["internal_count"] == 0:
+        issues.append(build_issue("links", "medium", "No internal links were detected.", recommendation="Link to relevant pages on the same site."))
+    if link_data["anchor_texts"]["[Empty Anchor]"] > 0:
+        issues.append(build_issue("links", "medium", "Some links have empty anchor text.", evidence={"empty_anchor_count": link_data["anchor_texts"]["[Empty Anchor]"]}, recommendation="Ensure linked elements have descriptive accessible names."))
+
+    if tech_data["https_status"] != "good":
+        issues.append(build_issue("technical", "high", "Page is not using HTTPS.", recommendation="Serve the page over HTTPS."))
+    if tech_data["robots_txt"]["status"] != "Found":
+        issues.append(build_issue("technical", "low", "robots.txt was not found.", evidence={"status": tech_data["robots_txt"]["status"]}, recommendation="Publish a robots.txt file if the site should guide crawlers."))
+    if "Found" not in tech_data["sitemap_xml"]["status"]:
+        issues.append(build_issue("technical", "low", "Sitemap was not detected in common locations.", evidence={"status": tech_data["sitemap_xml"]["status"]}, recommendation="Expose a sitemap and reference it from robots.txt."))
+    if not tech_data["schema_markup"]["present"]:
+        issues.append(build_issue("technical", "low", "Valid schema markup was not detected.", recommendation="Add valid JSON-LD where it adds search value."))
+
+    severity_rank = {"high": 0, "medium": 1, "low": 2}
+    issues.sort(key=lambda issue: (severity_rank.get(issue["severity"], 3), issue["category"], issue["message"]))
+    return issues
+
+
+def analyze_html_document(html_content, url, load_time=None):
+    soup = parse_html(html_content)
+    meta_data, meta_score = analyze_meta_tags(soup, url)
+    content_data, content_score = analyze_on_page_content(soup)
+    link_data, link_score = analyze_links(soup, url)
+    tech_data, tech_score, warnings = analyze_technical_seo(url, soup, load_time, meta_data)
+    issues = generate_issues(meta_data, content_data, link_data, tech_data)
+    overall_score = (
+        meta_score * 0.20 +
+        content_score * 0.35 +
+        link_score * 0.15 +
+        tech_score * 0.30
+    )
+    return {
+        "meta_data": meta_data,
+        "meta_score": meta_score,
+        "content_data": content_data,
+        "content_score": content_score,
+        "link_data": link_data,
+        "link_score": link_score,
+        "tech_data": tech_data,
+        "tech_score": tech_score,
+        "warnings": warnings,
+        "issues": issues,
+        "overall_score": overall_score,
+    }
+
+
 def analyze_url(url):
     html_content, final_url, load_time, fetch_error, warnings = fetch_content(url)
     if fetch_error or html_content is None:
@@ -686,19 +797,8 @@ def analyze_url(url):
             "warnings": warnings,
         }
 
-    soup = parse_html(html_content)
-    meta_data, meta_score = analyze_meta_tags(soup, final_url)
-    content_data, content_score = analyze_on_page_content(soup)
-    link_data, link_score = analyze_links(soup, final_url)
-    tech_data, tech_score, tech_warnings = analyze_technical_seo(final_url, soup, load_time, meta_data)
-
-    overall_score = (
-        meta_score * 0.20 +
-        content_score * 0.35 +
-        link_score * 0.15 +
-        tech_score * 0.30
-    )
-    warnings.extend(tech_warnings)
+    analysis_results = analyze_html_document(html_content, final_url, load_time=load_time)
+    warnings.extend(analysis_results["warnings"])
 
     return {
         "html_content": html_content,
@@ -706,13 +806,5 @@ def analyze_url(url):
         "load_time": load_time,
         "fetch_error": None,
         "warnings": warnings,
-        "meta_data": meta_data,
-        "meta_score": meta_score,
-        "content_data": content_data,
-        "content_score": content_score,
-        "link_data": link_data,
-        "link_score": link_score,
-        "tech_data": tech_data,
-        "tech_score": tech_score,
-        "overall_score": overall_score,
+        **analysis_results,
     }
