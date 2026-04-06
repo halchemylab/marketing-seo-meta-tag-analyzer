@@ -20,6 +20,10 @@ GOOD_LOAD_TIME_THRESHOLD = 2.0
 OK_LOAD_TIME_THRESHOLD = 4.0
 GOOD_READABILITY_THRESHOLD = 60
 MAX_KEYWORDS_TO_SHOW = 10
+TITLE_MIN_LENGTH = 15
+TITLE_MAX_LENGTH = 60
+DESCRIPTION_MIN_LENGTH = 70
+DESCRIPTION_MAX_LENGTH = 160
 
 
 def is_valid_url(url):
@@ -71,6 +75,74 @@ def get_domain(url):
         return None
 
 
+def normalize_netloc(netloc):
+    if not netloc:
+        return ""
+    return netloc.lower().split(":")[0].removeprefix("www.")
+
+
+def is_same_site(url_a, url_b):
+    return normalize_netloc(get_domain(url_a)) == normalize_netloc(get_domain(url_b))
+
+
+def validate_length(text, min_length, max_length):
+    if not text:
+        return "missing"
+    text_length = len(text.strip())
+    if min_length <= text_length <= max_length:
+        return "good"
+    if text_length < min_length:
+        return "short"
+    return "long"
+
+
+def validate_canonical_url(page_url, canonical_url):
+    if not canonical_url:
+        return "missing"
+    parsed = urlparse(canonical_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "invalid"
+    if parsed.fragment:
+        return "invalid"
+    if not is_same_site(page_url, canonical_url):
+        return "cross_domain"
+    return "good"
+
+
+def parse_robots_directives(content):
+    if not content:
+        return set()
+    return {directive.strip().lower() for directive in content.split(",") if directive.strip()}
+
+
+def validate_viewport_content(content):
+    if not content:
+        return "missing"
+    normalized = content.replace(" ", "").lower()
+    if "width=device-width" not in normalized:
+        return "invalid"
+    if "initial-scale=1" in normalized:
+        return "good"
+    return "partial"
+
+
+def extract_schema_types(schema_json):
+    schema_types = []
+    if isinstance(schema_json, dict):
+        if "@graph" in schema_json and isinstance(schema_json["@graph"], list):
+            for item in schema_json["@graph"]:
+                schema_types.extend(extract_schema_types(item))
+        schema_type = schema_json.get("@type")
+        if isinstance(schema_type, list):
+            schema_types.extend(str(item) for item in schema_type)
+        elif schema_type:
+            schema_types.append(str(schema_type))
+    elif isinstance(schema_json, list):
+        for item in schema_json:
+            schema_types.extend(extract_schema_types(item))
+    return schema_types
+
+
 def clean_text(text):
     text = text.lower()
     text = re.sub(r"[^\w\s-]", "", text)
@@ -81,10 +153,15 @@ def clean_text(text):
 def analyze_meta_tags(soup, url):
     meta_data = {
         "title": None,
+        "title_status": "missing",
         "description": None,
+        "description_status": "missing",
         "keywords": None,
         "robots": None,
+        "robots_directives": [],
+        "robots_status": "default",
         "canonical": None,
+        "canonical_status": "missing",
         "og:title": None,
         "og:description": None,
         "og:image": None,
@@ -99,18 +176,31 @@ def analyze_meta_tags(soup, url):
         "language": None,
         "favicon": None,
         "alternate": [],
+        "viewport_status": "missing",
     }
     scoring = {"points": 0, "max_points": 28}
 
     title_tag = soup.find("title")
     if title_tag and title_tag.string:
         meta_data["title"] = title_tag.string.strip()
-        scoring["points"] += 5
+        meta_data["title_status"] = validate_length(meta_data["title"], TITLE_MIN_LENGTH, TITLE_MAX_LENGTH)
+        if meta_data["title_status"] == "good":
+            scoring["points"] += 5
+        elif meta_data["title_status"] in {"short", "long"}:
+            scoring["points"] += 2
 
     desc_tag = soup.find("meta", attrs={"name": "description"})
     if desc_tag and desc_tag.get("content"):
         meta_data["description"] = desc_tag["content"].strip()
-        scoring["points"] += 4
+        meta_data["description_status"] = validate_length(
+            meta_data["description"],
+            DESCRIPTION_MIN_LENGTH,
+            DESCRIPTION_MAX_LENGTH,
+        )
+        if meta_data["description_status"] == "good":
+            scoring["points"] += 4
+        elif meta_data["description_status"] in {"short", "long"}:
+            scoring["points"] += 2
 
     keywords_tag = soup.find("meta", attrs={"name": "keywords"})
     if keywords_tag and keywords_tag.get("content"):
@@ -119,12 +209,25 @@ def analyze_meta_tags(soup, url):
     robots_tag = soup.find("meta", attrs={"name": "robots"})
     if robots_tag and robots_tag.get("content"):
         meta_data["robots"] = robots_tag["content"].strip()
-        scoring["points"] += 1
+        directives = parse_robots_directives(meta_data["robots"])
+        meta_data["robots_directives"] = sorted(directives)
+        if {"noindex", "index"} <= directives or {"nofollow", "follow"} <= directives:
+            meta_data["robots_status"] = "conflict"
+        elif "noindex" in directives or "nofollow" in directives:
+            meta_data["robots_status"] = "restrictive"
+            scoring["points"] += 0.5
+        else:
+            meta_data["robots_status"] = "valid"
+            scoring["points"] += 1
 
     canonical_tag = soup.find("link", attrs={"rel": "canonical"})
     if canonical_tag and canonical_tag.get("href"):
         meta_data["canonical"] = urljoin(url, canonical_tag["href"])
-        scoring["points"] += 3
+        meta_data["canonical_status"] = validate_canonical_url(url, meta_data["canonical"])
+        if meta_data["canonical_status"] == "good":
+            scoring["points"] += 3
+        elif meta_data["canonical_status"] == "cross_domain":
+            scoring["points"] += 1
 
     og_tags = soup.find_all("meta", property=lambda value: value and value.startswith("og:"))
     for tag in og_tags:
@@ -155,9 +258,10 @@ def analyze_meta_tags(soup, url):
     viewport_tag = soup.find("meta", attrs={"name": "viewport"})
     if viewport_tag and viewport_tag.get("content"):
         meta_data["viewport"] = viewport_tag["content"].strip()
-        if "width=device-width" in meta_data["viewport"] and "initial-scale=1" in meta_data["viewport"]:
+        meta_data["viewport_status"] = validate_viewport_content(meta_data["viewport"])
+        if meta_data["viewport_status"] == "good":
             scoring["points"] += 3
-        elif "width=device-width" in meta_data["viewport"]:
+        elif meta_data["viewport_status"] == "partial":
             scoring["points"] += 1
 
     author_tag = soup.find("meta", attrs={"name": "author"})
@@ -404,7 +508,7 @@ def analyze_links(soup, base_url):
             continue
 
         link_domain = get_domain(full_url)
-        if link_domain == base_domain:
+        if normalize_netloc(link_domain) == normalize_netloc(base_domain):
             link_data["internal"].append(full_url)
             link_data["internal_count"] += 1
             link_info["type"] = "internal"
@@ -524,11 +628,12 @@ def analyze_technical_seo(url, soup, load_time, meta_data):
 
     viewport_content = meta_data.get("viewport")
     if viewport_content:
-        if "width=device-width" in viewport_content and "initial-scale=1" in viewport_content:
+        viewport_status = validate_viewport_content(viewport_content)
+        if viewport_status == "good":
             tech_data["mobile_friendly"]["status"] = "good"
             tech_data["mobile_friendly"]["reason"] = "Viewport tag correctly configured."
             scoring["points"] += 5
-        elif "width=device-width" in viewport_content:
+        elif viewport_status == "partial":
             tech_data["mobile_friendly"]["status"] = "warning"
             tech_data["mobile_friendly"]["reason"] = (
                 "Viewport tag found, but might lack `initial-scale=1`."
@@ -546,29 +651,25 @@ def analyze_technical_seo(url, soup, load_time, meta_data):
     schema_tags = soup.find_all("script", type="application/ld+json")
     for tag in schema_tags:
         try:
-            schema_json = json.loads(tag.string)
+            schema_json = json.loads(tag.string or "")
             tech_data["schema_markup"]["present"] = True
             tech_data["schema_markup"]["details"].append(schema_json)
-            if isinstance(schema_json, dict):
-                schema_type = schema_json.get("@type")
-                if schema_type:
-                    tech_data["schema_markup"]["types"].append(str(schema_type))
-            elif isinstance(schema_json, list):
-                for item in schema_json:
-                    if isinstance(item, dict):
-                        schema_type = item.get("@type")
-                        if schema_type:
-                            tech_data["schema_markup"]["types"].append(str(schema_type))
+            tech_data["schema_markup"]["types"].extend(extract_schema_types(schema_json))
         except json.JSONDecodeError:
-            tech_data["schema_markup"]["present"] = True
             tech_data["schema_markup"]["types"].append("Error Parsing")
             warnings.append("Found schema tag (application/ld+json) but could not parse its content.")
         except Exception:
-            tech_data["schema_markup"]["present"] = True
             tech_data["schema_markup"]["types"].append("Error Processing")
 
-    if tech_data["schema_markup"]["present"]:
+    valid_schema_types = [
+        schema_type for schema_type in tech_data["schema_markup"]["types"]
+        if schema_type not in {"Error Parsing", "Error Processing"}
+    ]
+    if valid_schema_types:
+        tech_data["schema_markup"]["present"] = True
         scoring["points"] += 3
+    else:
+        tech_data["schema_markup"]["present"] = False
 
     tech_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
     return tech_data, tech_score, warnings
