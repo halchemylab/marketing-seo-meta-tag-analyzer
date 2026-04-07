@@ -1,12 +1,6 @@
 import streamlit as st
 
-from seo_analysis import (
-    GOOD_READABILITY_THRESHOLD,
-    MAX_KEYWORDS_TO_SHOW,
-    MIN_CONTENT_LENGTH_WORDS,
-    analyze_url,
-    is_valid_url,
-)
+from seo_analysis import GOOD_READABILITY_THRESHOLD, MAX_KEYWORDS_TO_SHOW, analyze_url, is_valid_url
 
 MAX_LINKS_TO_SHOW = 15
 
@@ -203,7 +197,7 @@ if st.button("Analyze URL", key="analyze_button"):
             col_c1, col_c2 = st.columns(2)
             wc_status = (
                 "good"
-                if content_data["word_count"] >= MIN_CONTENT_LENGTH_WORDS
+                if content_data["word_count"] >= content_data["target_word_count"]
                 else ("warning" if content_data["word_count"] > 0 else "bad")
             )
             with col_c1:
@@ -211,7 +205,7 @@ if st.button("Analyze URL", key="analyze_button"):
                     "Word Count",
                     f"{content_data['word_count']} words",
                     wc_status,
-                    f"Total words found in the main content area. Recommended: {MIN_CONTENT_LENGTH_WORDS}+",
+                    f"Total words found in the primary content area. Target for detected page type ({content_data['page_type']}): {content_data['target_word_count']}+",
                 )
             with col_c2:
                 readability_status = "info"
@@ -226,7 +220,18 @@ if st.button("Analyze URL", key="analyze_button"):
                     "Readability (Flesch Score)",
                     content_data["readability_desc"],
                     readability_status,
-                    "Score indicating how easy the text is to read. Higher is better (60+ is generally good).",
+                    "Score indicating how easy the text is to read. This is emphasized for article, documentation, and generic pages.",
+                )
+
+            display_metric_card(
+                "Detected Page Type",
+                content_data["page_type"].replace("_", " ").title(),
+                "info",
+                "Used to adjust content expectations so product, category, homepage, and article pages are not judged the same way.",
+            )
+            if content_data.get("primary_content_selector"):
+                st.caption(
+                    f"Primary content extracted from `{content_data['primary_content_selector']}` for content scoring."
                 )
 
             st.subheader("Heading Structure (H1-H6)")
@@ -255,10 +260,10 @@ if st.button("Analyze URL", key="analyze_button"):
             else:
                 st.warning("No heading tags (H1-H6) found on the page.")
 
-            st.subheader("Keyword Analysis (Top Terms)")
+            st.subheader("Topic Terms (Informational)")
             if content_data["top_keywords"]:
                 st.markdown(
-                    f"Top {len(content_data['top_keywords'])} keywords found in the content (based on frequency, excludes common stop words):"
+                    f"Top {len(content_data['top_keywords'])} recurring terms found in the primary content. These are shown for inspection, not used as a direct SEO score signal:"
                 )
                 kw_data = [
                     {"Keyword": kw[0], "Count": kw[1], "Density (%)": f"{kw[2]:.2f}%"}
@@ -266,7 +271,20 @@ if st.button("Analyze URL", key="analyze_button"):
                 ]
                 st.dataframe(kw_data, use_container_width=True)
             else:
-                st.info("No significant keywords could be extracted (or content is very short).")
+                st.info("No recurring terms could be extracted from the primary content.")
+
+            alignment = content_data["title_h1_alignment"]
+            st.subheader("Title and H1 Alignment")
+            if alignment["status"] == "good":
+                st.success("Title and primary H1 strongly align.")
+            elif alignment["status"] == "partial":
+                st.warning("Title and primary H1 partially align.")
+            elif alignment["status"] == "weak":
+                st.warning("Title and primary H1 appear weakly aligned.")
+            else:
+                st.info("Title/H1 alignment could not be calculated.")
+            if alignment["shared_terms"]:
+                st.caption(f"Shared terms: {', '.join(f'`{term}`' for term in alignment['shared_terms'])}")
 
             st.subheader("Image Alt Text Analysis")
             img_alt = content_data["image_alt_analysis"]

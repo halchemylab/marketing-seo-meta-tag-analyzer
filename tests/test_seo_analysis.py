@@ -74,6 +74,50 @@ HTML_WITH_NOINDEX = """
 """
 
 
+HTML_HOMEPAGE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Example Platform for SEO Teams</title>
+  <meta name="description" content="Example Platform helps SEO teams monitor websites, report on technical health, and improve metadata quality at scale.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="canonical" href="https://example.com/">
+</head>
+<body>
+  <header><nav><a href="/features">Features</a><a href="/pricing">Pricing</a></nav></header>
+  <main>
+    <h1>SEO monitoring for modern teams</h1>
+    <p>Track crawlers, metadata, and page health from one dashboard.</p>
+    <p>Ship fixes faster with automated issue prioritization and alerts.</p>
+    <p>Review title tags, canonicals, robots signals, schema, and internal linking from a single workspace.</p>
+    <p>Share clear recommendations with content, engineering, and leadership without digging through multiple tools.</p>
+    <p>Monitor technical SEO health daily, compare page templates, and catch indexability regressions before they affect traffic.</p>
+  </main>
+  <footer><a href="/contact">Contact</a></footer>
+</body>
+</html>
+"""
+
+
+HTML_WITH_TITLE_H1_MISMATCH = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Enterprise Security Automation Platform</title>
+  <meta name="description" content="A descriptive meta description that is long enough for the analyzer to treat as valid for this test fixture.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="canonical" href="https://example.com/platform">
+</head>
+<body>
+  <main>
+    <h1>Organic Coffee Beans Subscription</h1>
+    <p>This fixture is intentionally mismatched so the analyzer can flag weak intent alignment between the title and the primary heading.</p>
+  </main>
+</body>
+</html>
+"""
+
+
 class SeoAnalysisTests(unittest.TestCase):
     def test_content_analysis_does_not_remove_links_from_other_analyzers(self):
         results = analyze_html_document(HTML_WITH_NAV_AND_FOOTER, BASE_URL, load_time=1.5)
@@ -139,6 +183,23 @@ class SeoAnalysisTests(unittest.TestCase):
         self.assertIn(
             "canonical_points_to_different_same_site_url",
             results["tech_data"]["indexability"]["warnings"],
+        )
+
+    def test_homepage_uses_page_type_specific_word_count_target(self):
+        results = analyze_html_document(HTML_HOMEPAGE, "https://example.com/", load_time=1.5)
+        self.assertEqual(results["content_data"]["page_type"], "homepage")
+        self.assertEqual(results["content_data"]["target_word_count"], 60)
+        self.assertNotIn(
+            "Main content is thin for this page type.",
+            {issue["message"] for issue in results["issues"]},
+        )
+
+    def test_title_h1_mismatch_is_reported(self):
+        results = analyze_html_document(HTML_WITH_TITLE_H1_MISMATCH, "https://example.com/platform", load_time=1.5)
+        self.assertEqual(results["content_data"]["title_h1_alignment"]["status"], "weak")
+        self.assertIn(
+            "Title and primary H1 are weakly aligned.",
+            {issue["message"] for issue in results["issues"]},
         )
 
 

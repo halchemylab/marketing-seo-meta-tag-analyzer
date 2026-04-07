@@ -24,6 +24,14 @@ TITLE_MIN_LENGTH = 15
 TITLE_MAX_LENGTH = 60
 DESCRIPTION_MIN_LENGTH = 70
 DESCRIPTION_MAX_LENGTH = 160
+PAGE_TYPE_CONTENT_THRESHOLDS = {
+    "homepage": 60,
+    "product": 60,
+    "category": 80,
+    "article": 300,
+    "documentation": 180,
+    "generic": 150,
+}
 
 
 def is_valid_url(url):
@@ -205,6 +213,94 @@ def clean_text(text):
     text = re.sub(r"[^\w\s-]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def tokenize_text(text):
+    return [
+        token
+        for token in clean_text(text).split()
+        if len(token) > 2
+    ]
+
+
+def detect_page_type(soup, page_url):
+    path = (urlparse(page_url).path or "/").lower()
+    path_segments = [segment for segment in path.split("/") if segment]
+    body = soup.find("body") or soup
+
+    if path == "/" or body.find("main") and len(path_segments) == 0:
+        return "homepage"
+    if body.find("article") or soup.find("meta", attrs={"property": "article:published_time"}):
+        return "article"
+    if body.find(attrs={"itemtype": re.compile("product", re.I)}) or re.search(
+        r"(add to cart|buy now|\$\d|usd|price)",
+        body.get_text(" ", strip=True),
+        re.I,
+    ):
+        return "product"
+    if any(segment in {"docs", "documentation", "guide", "api"} for segment in path_segments) or body.find_all(["pre", "code"]):
+        return "documentation"
+    if any(segment in {"category", "collections", "shop", "products"} for segment in path_segments):
+        return "category"
+    if len(body.find_all("a", href=True)) >= 20 and len(body.find_all(["h2", "h3"])) >= 3:
+        return "category"
+    return "generic"
+
+
+def get_primary_content_root(soup):
+    primary_selectors = [
+        ("main", {}),
+        ("article", {}),
+        ("div", {"role": "main"}),
+        ("section", {"role": "main"}),
+    ]
+    for tag_name, attrs in primary_selectors:
+        root = soup.find(tag_name, attrs=attrs)
+        if root:
+            return deepcopy(root), tag_name
+
+    body = soup.find("body")
+    if body:
+        return deepcopy(body), "body"
+    return None, None
+
+
+def count_content_words(text):
+    return len([word for word in text.split() if word])
+
+
+def assess_title_h1_alignment(title, h1_text):
+    if not title or not h1_text:
+        return {"status": "missing", "overlap_ratio": 0.0, "shared_terms": []}
+
+    title_terms = set(tokenize_text(title))
+    h1_terms = set(tokenize_text(h1_text))
+    if not title_terms or not h1_terms:
+        return {"status": "missing", "overlap_ratio": 0.0, "shared_terms": []}
+
+    shared_terms = sorted(title_terms & h1_terms)
+    overlap_ratio = len(shared_terms) / max(min(len(title_terms), len(h1_terms)), 1)
+    if overlap_ratio >= 0.5:
+        status = "good"
+    elif overlap_ratio >= 0.2:
+        status = "partial"
+    else:
+        status = "weak"
+    return {"status": status, "overlap_ratio": overlap_ratio, "shared_terms": shared_terms}
+
+
+def find_duplicate_heading_groups(headings):
+    counts = Counter()
+    for heading_values in headings.values():
+        for heading in heading_values:
+            normalized = clean_text(heading)
+            if normalized:
+                counts[normalized] += 1
+    return [
+        {"text": text, "count": count}
+        for text, count in counts.items()
+        if count > 1
+    ]
 
 
 def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_document=True):
@@ -416,8 +512,13 @@ def analyze_meta_tags(soup, url):
     return meta_data, meta_score
 
 
-def analyze_on_page_content(soup):
+def analyze_on_page_content(soup, meta_data, page_url):
+    page_type = detect_page_type(soup, page_url)
+    target_word_count = PAGE_TYPE_CONTENT_THRESHOLDS.get(page_type, PAGE_TYPE_CONTENT_THRESHOLDS["generic"])
     content_data = {
+        "page_type": page_type,
+        "target_word_count": target_word_count,
+        "primary_content_selector": None,
         "headings": {},
         "word_count": 0,
         "readability_score": None,
@@ -425,6 +526,9 @@ def analyze_on_page_content(soup):
         "top_keywords": [],
         "image_alt_analysis": {"total": 0, "with_alt": 0, "missing_alt": 0, "alt_tags": []},
         "text_content": "",
+        "title_h1_alignment": {"status": "missing", "overlap_ratio": 0.0, "shared_terms": []},
+        "duplicate_headings": [],
+        "primary_content_found": False,
     }
     scoring = {"points": 0, "max_points": 30}
 
@@ -454,20 +558,29 @@ def analyze_on_page_content(soup):
     elif has_h1:
         scoring["points"] += 1
 
-    body = deepcopy(soup.find("body"))
-    if body:
-        for element in body(["script", "style", "nav", "footer", "aside"]):
+    primary_root, selector_used = get_primary_content_root(soup)
+    if primary_root:
+        content_data["primary_content_found"] = True
+        content_data["primary_content_selector"] = selector_used
+        for element in primary_root(["script", "style", "nav", "footer", "aside", "noscript", "form"]):
             element.decompose()
-        raw_text = body.get_text(separator=" ", strip=True)
+        raw_text = primary_root.get_text(separator=" ", strip=True)
         content_data["text_content"] = raw_text
-        content_data["word_count"] = len(raw_text.split())
+        content_data["word_count"] = count_content_words(raw_text)
+        if selector_used in {"main", "article"}:
+            scoring["points"] += 4
+        else:
+            scoring["points"] += 2
 
-    if content_data["word_count"] >= MIN_CONTENT_LENGTH_WORDS:
+    if content_data["word_count"] >= target_word_count:
         scoring["points"] += 5
+    elif content_data["word_count"] >= max(target_word_count * 0.5, 40):
+        scoring["points"] += 3
     elif content_data["word_count"] > 0:
         scoring["points"] += 2
 
-    if content_data["word_count"] > 50:
+    should_score_readability = page_type in {"article", "documentation", "generic"}
+    if should_score_readability and content_data["word_count"] > 50:
         try:
             content_data["readability_score"] = textstat.flesch_reading_ease(content_data["text_content"])
             score = content_data["readability_score"]
@@ -481,6 +594,8 @@ def analyze_on_page_content(soup):
                 content_data["readability_desc"] = f"Difficult ({score:.1f} - Very confusing)"
         except Exception:
             content_data["readability_desc"] = "Calculation Error"
+    elif not should_score_readability:
+        content_data["readability_desc"] = f"Not scored for {page_type} pages"
     else:
         content_data["readability_desc"] = "Not enough content to calculate"
 
@@ -550,8 +665,19 @@ def analyze_on_page_content(soup):
             for word, count in word_counts.most_common(MAX_KEYWORDS_TO_SHOW):
                 density = (count / total_meaningful_words) * 100 if total_meaningful_words > 0 else 0
                 content_data["top_keywords"].append((word, count, density))
-            if content_data["top_keywords"]:
-                scoring["points"] += 5
+
+    primary_h1 = content_data["headings"].get("h1", [None])[0]
+    content_data["title_h1_alignment"] = assess_title_h1_alignment(meta_data.get("title"), primary_h1)
+    if content_data["title_h1_alignment"]["status"] == "good":
+        scoring["points"] += 4
+    elif content_data["title_h1_alignment"]["status"] == "partial":
+        scoring["points"] += 2
+
+    content_data["duplicate_headings"] = find_duplicate_heading_groups(content_data["headings"])
+    if not content_data["duplicate_headings"]:
+        scoring["points"] += 3
+    elif len(content_data["duplicate_headings"]) <= 2:
+        scoring["points"] += 1
 
     images = soup.find_all("img")
     content_data["image_alt_analysis"]["total"] = len(images)
@@ -849,8 +975,18 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
     elif len(content_data["headings"].get("h1", [])) > 1:
         issues.append(build_issue("content", "medium", "Multiple H1 headings were found.", evidence={"h1_count": len(content_data["headings"].get("h1", []))}, recommendation="Consolidate to one primary H1 where possible."))
 
-    if content_data["word_count"] < MIN_CONTENT_LENGTH_WORDS:
-        issues.append(build_issue("content", "medium", "Main content is thin.", evidence={"word_count": content_data["word_count"]}, recommendation="Expand the main body content if the page is intended to rank organically."))
+    if not content_data["primary_content_found"]:
+        issues.append(build_issue("content", "medium", "Primary content area could not be identified confidently.", recommendation="Use semantic containers like `<main>` or `<article>` to separate core content from template chrome."))
+
+    if content_data["word_count"] < content_data["target_word_count"]:
+        issues.append(build_issue("content", "medium", "Main content is thin for this page type.", evidence={"page_type": content_data["page_type"], "word_count": content_data["word_count"], "target_word_count": content_data["target_word_count"]}, recommendation="Add more primary content if this page is meant to rank, using expectations appropriate for the page type."))  # noqa: E501
+
+    alignment_status = content_data["title_h1_alignment"]["status"]
+    if alignment_status == "weak":
+        issues.append(build_issue("content", "medium", "Title and primary H1 are weakly aligned.", evidence={"shared_terms": content_data["title_h1_alignment"]["shared_terms"]}, recommendation="Make the title and main heading reinforce the same search intent."))  # noqa: E501
+
+    if content_data["duplicate_headings"]:
+        issues.append(build_issue("content", "low", "Duplicate heading text was found.", evidence={"duplicates": content_data["duplicate_headings"]}, recommendation="Reduce repeated headings unless they are intentionally reused UI labels."))  # noqa: E501
 
     missing_alt = content_data["image_alt_analysis"]["missing_alt"]
     if missing_alt > 0:
@@ -878,7 +1014,7 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
 def analyze_html_document(html_content, url, load_time=None, response_headers=None, is_html_document=True):
     soup = parse_html(html_content)
     meta_data, meta_score = analyze_meta_tags(soup, url)
-    content_data, content_score = analyze_on_page_content(soup)
+    content_data, content_score = analyze_on_page_content(soup, meta_data, url)
     link_data, link_score = analyze_links(soup, url)
     tech_data, tech_score, warnings = analyze_technical_seo(
         url,
