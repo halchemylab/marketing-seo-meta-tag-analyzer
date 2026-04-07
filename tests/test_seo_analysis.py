@@ -54,6 +54,26 @@ HTML_WITH_BROKEN_SCHEMA = """
 """
 
 
+HTML_WITH_NOINDEX = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>This is a reasonably sized title for testing</title>
+  <meta name="description" content="This is a reasonably sized meta description for testing the validation logic in the SEO analyzer output.">
+  <meta name="robots" content="noindex, follow">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="canonical" href="https://example.com/page">
+</head>
+<body>
+  <main>
+    <h1>Primary heading</h1>
+    <p>This page includes enough text to avoid unrelated failures while testing indexability logic.</p>
+  </main>
+</body>
+</html>
+"""
+
+
 class SeoAnalysisTests(unittest.TestCase):
     def test_content_analysis_does_not_remove_links_from_other_analyzers(self):
         results = analyze_html_document(HTML_WITH_NAV_AND_FOOTER, BASE_URL, load_time=1.5)
@@ -77,6 +97,49 @@ class SeoAnalysisTests(unittest.TestCase):
         self.assertEqual(results["meta_data"]["description_status"], "short")
         self.assertIn("Title tag is too short.", messages)
         self.assertIn("Meta description is short.", messages)
+
+    def test_meta_noindex_blocks_indexability(self):
+        results = analyze_html_document(HTML_WITH_NOINDEX, BASE_URL, load_time=1.5)
+        self.assertFalse(results["tech_data"]["indexability"]["can_be_indexed"])
+        self.assertIn("meta_noindex", results["tech_data"]["indexability"]["blockers"])
+        self.assertTrue(
+            any(issue["message"] == "Page is unlikely to be indexable by search engines." for issue in results["issues"])
+        )
+
+    def test_x_robots_noindex_blocks_indexability(self):
+        results = analyze_html_document(
+            HTML_WITH_NAV_AND_FOOTER,
+            BASE_URL,
+            load_time=1.5,
+            response_headers={"X-Robots-Tag": "noindex, nofollow"},
+        )
+        self.assertFalse(results["tech_data"]["indexability"]["can_be_indexed"])
+        self.assertIn("x_robots_noindex", results["tech_data"]["indexability"]["blockers"])
+
+    def test_same_site_non_self_canonical_triggers_indexability_warning(self):
+        html = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>This is a reasonably sized title for testing</title>
+  <meta name="description" content="This is a reasonably sized meta description for testing the validation logic in the SEO analyzer output.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="canonical" href="https://example.com/other-page">
+</head>
+<body>
+  <main>
+    <h1>Primary heading</h1>
+    <p>This page includes enough text to avoid unrelated failures while testing indexability logic.</p>
+  </main>
+</body>
+</html>
+"""
+        results = analyze_html_document(html, BASE_URL, load_time=1.5)
+        self.assertTrue(results["tech_data"]["indexability"]["can_be_indexed"])
+        self.assertIn(
+            "canonical_points_to_different_same_site_url",
+            results["tech_data"]["indexability"]["warnings"],
+        )
 
 
 if __name__ == "__main__":

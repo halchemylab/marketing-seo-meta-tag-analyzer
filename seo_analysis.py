@@ -52,13 +52,13 @@ def fetch_content(url):
             warnings.append(
                 f"Content type is '{content_type}', not 'text/html'. Analysis might be limited."
             )
-        return response.content, response.url, load_time, None, warnings
+        return response.content, response.url, load_time, None, warnings, response.headers
     except requests.exceptions.Timeout:
-        return None, url, None, f"Error: Request timed out after {REQUEST_TIMEOUT} seconds.", warnings
+        return None, url, None, f"Error: Request timed out after {REQUEST_TIMEOUT} seconds.", warnings, {}
     except requests.exceptions.RequestException as exc:
-        return None, url, None, f"Error fetching URL: {exc}", warnings
+        return None, url, None, f"Error fetching URL: {exc}", warnings, {}
     except Exception as exc:
-        return None, url, None, f"An unexpected error occurred during fetch: {exc}", warnings
+        return None, url, None, f"An unexpected error occurred during fetch: {exc}", warnings, {}
 
 
 def parse_html(html_content):
@@ -117,10 +117,49 @@ def validate_canonical_url(page_url, canonical_url):
     return "good"
 
 
+def normalize_url_for_comparison(url):
+    parsed = urlparse(url)
+    normalized_path = parsed.path or "/"
+    if normalized_path != "/" and normalized_path.endswith("/"):
+        normalized_path = normalized_path.rstrip("/")
+    return (
+        parsed.scheme.lower(),
+        normalize_netloc(parsed.netloc),
+        normalized_path,
+        parsed.query,
+    )
+
+
 def parse_robots_directives(content):
     if not content:
         return set()
     return {directive.strip().lower() for directive in content.split(",") if directive.strip()}
+
+
+def parse_x_robots_tag(headers):
+    if not headers:
+        return []
+
+    raw_values = []
+    if hasattr(headers, "get_all"):
+        raw_values.extend(headers.get_all("X-Robots-Tag", []))
+
+    header_value = headers.get("X-Robots-Tag")
+    if header_value:
+        raw_values.append(header_value)
+
+    directives = set()
+    for raw_value in raw_values:
+        for part in raw_value.split(","):
+            directive = part.strip().lower()
+            if not directive:
+                continue
+            if ":" in directive:
+                _, directive = directive.split(":", 1)
+                directive = directive.strip()
+            if directive:
+                directives.add(directive)
+    return sorted(directives)
 
 
 def validate_viewport_content(content):
@@ -168,6 +207,55 @@ def clean_text(text):
     return text
 
 
+def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_document=True):
+    indexability = {
+        "can_be_indexed": True,
+        "status": "indexable",
+        "blockers": [],
+        "warnings": [],
+        "canonical_target": meta_data.get("canonical"),
+        "x_robots_tag": [],
+    }
+
+    x_robots_directives = parse_x_robots_tag(response_headers or {})
+    indexability["x_robots_tag"] = x_robots_directives
+
+    meta_robots_directives = set(meta_data.get("robots_directives", []))
+    x_robots_directives_set = set(x_robots_directives)
+
+    if not is_html_document:
+        indexability["blockers"].append("response_not_html")
+
+    if "noindex" in meta_robots_directives or "none" in meta_robots_directives:
+        indexability["blockers"].append("meta_noindex")
+    if "noindex" in x_robots_directives_set or "none" in x_robots_directives_set:
+        indexability["blockers"].append("x_robots_noindex")
+
+    canonical_status = meta_data.get("canonical_status")
+    canonical_target = meta_data.get("canonical")
+    if canonical_status == "invalid":
+        indexability["blockers"].append("invalid_canonical")
+    elif canonical_status == "cross_domain":
+        indexability["blockers"].append("cross_domain_canonical")
+    elif canonical_status == "good" and canonical_target:
+        if normalize_url_for_comparison(page_url) != normalize_url_for_comparison(canonical_target):
+            indexability["warnings"].append("canonical_points_to_different_same_site_url")
+
+    robots_status = meta_data.get("robots_status")
+    if robots_status == "conflict":
+        indexability["warnings"].append("conflicting_meta_robots")
+    if "unavailable_after" in meta_robots_directives or "unavailable_after" in x_robots_directives_set:
+        indexability["warnings"].append("time_limited_indexing")
+
+    if indexability["blockers"]:
+        indexability["can_be_indexed"] = False
+        indexability["status"] = "blocked"
+    elif indexability["warnings"]:
+        indexability["status"] = "caution"
+
+    return indexability
+
+
 def analyze_meta_tags(soup, url):
     meta_data = {
         "title": None,
@@ -195,6 +283,7 @@ def analyze_meta_tags(soup, url):
         "favicon": None,
         "alternate": [],
         "viewport_status": "missing",
+        "indexability": None,
     }
     scoring = {"points": 0, "max_points": 28}
 
@@ -554,7 +643,7 @@ def analyze_links(soup, base_url):
     return link_data, link_score
 
 
-def analyze_technical_seo(url, soup, load_time, meta_data):
+def analyze_technical_seo(url, soup, load_time, meta_data, response_headers=None, is_html_document=True):
     tech_data = {
         "robots_txt": {"status": "Not Checked", "content": None, "url": None},
         "sitemap_xml": {"status": "Not Checked", "url": None, "found_in_robots": False},
@@ -563,6 +652,12 @@ def analyze_technical_seo(url, soup, load_time, meta_data):
         "mobile_friendly": {"status": "Not Checked", "reason": ""},
         "https_status": "info",
         "schema_markup": {"present": False, "types": [], "details": []},
+        "indexability": evaluate_indexability(
+            url,
+            meta_data,
+            response_headers=response_headers,
+            is_html_document=is_html_document,
+        ),
     }
     scoring = {"points": 0, "max_points": 27}
     warnings = []
@@ -695,6 +790,28 @@ def analyze_technical_seo(url, soup, load_time, meta_data):
 
 def generate_issues(meta_data, content_data, link_data, tech_data):
     issues = []
+    indexability = tech_data["indexability"]
+
+    if not indexability["can_be_indexed"]:
+        issues.append(
+            build_issue(
+                "technical",
+                "high",
+                "Page is unlikely to be indexable by search engines.",
+                evidence={"blockers": indexability["blockers"]},
+                recommendation="Resolve the indexing blockers before relying on the page for organic search visibility.",
+            )
+        )
+    elif indexability["warnings"]:
+        issues.append(
+            build_issue(
+                "technical",
+                "medium",
+                "Page has indexability warnings that may affect the preferred indexed URL.",
+                evidence={"warnings": indexability["warnings"]},
+                recommendation="Review robots and canonical signals to ensure search engines can index the intended URL.",
+            )
+        )
 
     if meta_data["title_status"] == "missing":
         issues.append(build_issue("meta", "high", "Title tag is missing.", recommendation="Add a unique title tag."))
@@ -758,12 +875,20 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
     return issues
 
 
-def analyze_html_document(html_content, url, load_time=None):
+def analyze_html_document(html_content, url, load_time=None, response_headers=None, is_html_document=True):
     soup = parse_html(html_content)
     meta_data, meta_score = analyze_meta_tags(soup, url)
     content_data, content_score = analyze_on_page_content(soup)
     link_data, link_score = analyze_links(soup, url)
-    tech_data, tech_score, warnings = analyze_technical_seo(url, soup, load_time, meta_data)
+    tech_data, tech_score, warnings = analyze_technical_seo(
+        url,
+        soup,
+        load_time,
+        meta_data,
+        response_headers=response_headers,
+        is_html_document=is_html_document,
+    )
+    meta_data["indexability"] = tech_data["indexability"]
     issues = generate_issues(meta_data, content_data, link_data, tech_data)
     overall_score = (
         meta_score * 0.20 +
@@ -787,7 +912,7 @@ def analyze_html_document(html_content, url, load_time=None):
 
 
 def analyze_url(url):
-    html_content, final_url, load_time, fetch_error, warnings = fetch_content(url)
+    html_content, final_url, load_time, fetch_error, warnings, response_headers = fetch_content(url)
     if fetch_error or html_content is None:
         return {
             "html_content": html_content,
@@ -795,9 +920,17 @@ def analyze_url(url):
             "load_time": load_time,
             "fetch_error": fetch_error,
             "warnings": warnings,
+            "response_headers": response_headers,
         }
 
-    analysis_results = analyze_html_document(html_content, final_url, load_time=load_time)
+    content_type = (response_headers or {}).get("content-type", "").lower()
+    analysis_results = analyze_html_document(
+        html_content,
+        final_url,
+        load_time=load_time,
+        response_headers=response_headers,
+        is_html_document="text/html" in content_type,
+    )
     warnings.extend(analysis_results["warnings"])
 
     return {
@@ -806,5 +939,6 @@ def analyze_url(url):
         "load_time": load_time,
         "fetch_error": None,
         "warnings": warnings,
+        "response_headers": response_headers,
         **analysis_results,
     }
