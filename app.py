@@ -54,6 +54,7 @@ if st.button("Analyze URL", key="analyze_button"):
         tech_score = results["tech_score"]
         overall_score = results["overall_score"]
         issues = results["issues"]
+        indexability = tech_data["indexability"]
 
         if url_input.lower() != final_url.lower():
             st.info(f"Note: URL redirected to: {final_url}")
@@ -63,6 +64,10 @@ if st.button("Analyze URL", key="analyze_button"):
         st.header("🚀 Overall SEO Score")
         st.progress(int(overall_score) / 100)
         st.metric(label="Overall Score", value=f"{overall_score:.1f}%")
+        if not indexability["can_be_indexed"]:
+            st.error("This URL is currently unlikely to be indexable. The overall score is capped until those blockers are resolved.")
+        elif indexability["warnings"]:
+            st.warning("This URL has indexability warnings. Search engines may prefer a different URL than the one analyzed.")
         st.markdown("---")
 
         if issues:
@@ -381,6 +386,22 @@ if st.button("Analyze URL", key="analyze_button"):
                 st.markdown(
                     f"**{get_status_icon(tech_data['https_status'])} Security (HTTPS):** {https_status_map.get(tech_data['https_status'], 'Unknown')}"
                 )
+
+                indexability_status = "Indexable"
+                indexability_icon = "good"
+                if not indexability["can_be_indexed"]:
+                    indexability_status = "Blocked"
+                    indexability_icon = "bad"
+                elif indexability["warnings"]:
+                    indexability_status = "Needs Review"
+                    indexability_icon = "warning"
+                st.markdown(
+                    f"**{get_status_icon(indexability_icon)} Indexability:** {indexability_status}"
+                )
+                if indexability["blockers"]:
+                    st.caption(f"Blockers: {', '.join(f'`{item}`' for item in indexability['blockers'])}")
+                elif indexability["warnings"]:
+                    st.caption(f"Warnings: {', '.join(f'`{item}`' for item in indexability['warnings'])}")
 
                 lt_status = tech_data["load_time_status"]
                 lt_text = f"{tech_data['load_time']:.2f} seconds" if tech_data["load_time"] is not None else "Error"

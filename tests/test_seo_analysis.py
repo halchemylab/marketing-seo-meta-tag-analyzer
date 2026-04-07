@@ -118,6 +118,24 @@ HTML_WITH_TITLE_H1_MISMATCH = """
 """
 
 
+HTML_WITH_LOW_VALUE_META_ONLY = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta name="author" content="Example Team">
+  <link rel="icon" href="/favicon.ico">
+  <meta property="og:title" content="Social title">
+  <meta name="twitter:title" content="Social title">
+</head>
+<body>
+  <main>
+    <p>Minimal content only.</p>
+  </main>
+</body>
+</html>
+"""
+
+
 class SeoAnalysisTests(unittest.TestCase):
     def test_content_analysis_does_not_remove_links_from_other_analyzers(self):
         results = analyze_html_document(HTML_WITH_NAV_AND_FOOTER, BASE_URL, load_time=1.5)
@@ -201,6 +219,14 @@ class SeoAnalysisTests(unittest.TestCase):
             "Title and primary H1 are weakly aligned.",
             {issue["message"] for issue in results["issues"]},
         )
+
+    def test_non_indexable_pages_have_capped_overall_score(self):
+        results = analyze_html_document(HTML_WITH_NOINDEX, BASE_URL, load_time=1.5)
+        self.assertLessEqual(results["overall_score"], 35)
+
+    def test_low_value_meta_tags_do_not_create_strong_meta_score(self):
+        results = analyze_html_document(HTML_WITH_LOW_VALUE_META_ONLY, BASE_URL, load_time=1.5)
+        self.assertLess(results["meta_score"], 30)
 
 
 if __name__ == "__main__":
