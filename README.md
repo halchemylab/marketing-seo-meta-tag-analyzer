@@ -35,6 +35,7 @@ A Streamlit-based web application for inspecting SEO-relevant HTML signals on a 
 - sitemap.xml detection
 - Schema markup (Structured Data) validation
 - Viewport configuration check
+- Optional rendered-page analysis for JavaScript-heavy sites with static HTML fallback
 
 ### Prioritized Findings
 - Structured issue list with severity and recommended fixes
@@ -64,6 +65,12 @@ cd marketing-seo-meta-tag-analyzer
 pip install -r requirements.txt
 ```
 
+3. Optional but recommended for JavaScript-heavy websites:
+```bash
+pip install playwright
+playwright install chromium
+```
+
 ## 💻 Usage
 
 1. Start the Streamlit app:
@@ -75,7 +82,12 @@ streamlit run app.py
 
 3. Enter any webpage URL to analyze
 
-4. Review the score, structured findings, and detailed analysis tabs
+4. Choose an analysis mode:
+   - `Auto`: starts with static HTML and upgrades to a rendered DOM snapshot when the page looks client-rendered
+   - `Static HTML only`: fastest path and closest to raw crawler HTML
+   - `Rendered page`: uses a headless browser to evaluate JavaScript before analysis
+
+5. Review the score, structured findings, and detailed analysis tabs
 
 ## 📊 Analysis Categories
 
@@ -113,7 +125,7 @@ The tool uses a weighted scoring system to calculate the overall SEO score:
 
 ## ⚠️ Limitations
 
-- The tool analyzes fetched HTML and does not execute JavaScript-rendered content
+- JavaScript-rendered analysis is optional and requires Playwright with Chromium installed
 - Load time is measured from the analyzer server and is not a real-user performance metric
 - Mobile analysis is based on viewport configuration, not rendered layout or device testing
 - Some checks are validated HTML rules, while others remain heuristics
@@ -124,8 +136,8 @@ The tool uses a weighted scoring system to calculate the overall SEO score:
 
 - Strongest signals: tag presence, canonical formatting, robots.txt lookup, sitemap detection, schema parsing, and heading/image/link extraction from static HTML
 - Weaker signals: readability, keyword density, score weighting, server fetch time, and viewport-based mobile interpretation
-- Best fit: server-rendered or mostly static pages
-- Lower confidence: JavaScript-heavy pages where important content is injected after initial HTML
+- Best fit: server-rendered or mostly static pages, or JavaScript-heavy pages when rendered mode is available
+- Lower confidence: JavaScript-heavy pages analyzed in static-only mode, or pages that continue changing long after initial load
 
 ## 📜 License
 

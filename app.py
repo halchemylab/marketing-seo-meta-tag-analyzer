@@ -26,6 +26,16 @@ st.title("📊 Comprehensive SEO Parser")
 st.markdown("Enter a URL to analyze its SEO elements. Results are based on common best practices.")
 
 url_input = st.text_input("Enter URL (e.g., https://www.example.com):", key="url_input")
+analysis_mode = st.selectbox(
+    "Analysis Mode",
+    options=[
+        ("auto", "Auto (upgrade to rendered DOM when the page looks client-rendered)"),
+        ("static", "Static HTML only"),
+        ("rendered", "Rendered page (JavaScript-enabled)"),
+    ],
+    format_func=lambda item: item[1],
+    key="analysis_mode",
+)
 
 if st.button("Analyze URL", key="analyze_button"):
     if not url_input:
@@ -34,7 +44,7 @@ if st.button("Analyze URL", key="analyze_button"):
         st.error("Invalid URL format. Please include 'http://' or 'https://'.")
     else:
         with st.spinner(f"Fetching and analyzing {url_input}... This may take a moment."):
-            results = analyze_url(url_input)
+            results = analyze_url(url_input, fetch_mode=analysis_mode[0])
 
         if results["fetch_error"]:
             st.error(results["fetch_error"])
@@ -55,11 +65,17 @@ if st.button("Analyze URL", key="analyze_button"):
         overall_score = results["overall_score"]
         issues = results["issues"]
         indexability = tech_data["indexability"]
+        fetch_strategy = results.get("fetch_strategy", "static")
+        render_recommended = results.get("render_recommended", False)
 
         if url_input.lower() != final_url.lower():
             st.info(f"Note: URL redirected to: {final_url}")
 
         st.success(f"Analysis Complete for: {final_url}")
+        if fetch_strategy == "rendered":
+            st.info("Analysis used a rendered DOM snapshot after loading page JavaScript.")
+        elif render_recommended:
+            st.info("The page looked client-rendered, but the analyzer fell back to static HTML.")
 
         st.header("🚀 Overall SEO Score")
         st.progress(int(overall_score) / 100)

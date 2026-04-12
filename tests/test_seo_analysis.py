@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from seo_analysis import analyze_html_document
+from seo_analysis import analyze_html_document, analyze_url, should_attempt_rendered_fetch
 
 
 BASE_URL = "https://example.com/page"
@@ -137,6 +138,22 @@ HTML_WITH_LOW_VALUE_META_ONLY = """
 
 
 class SeoAnalysisTests(unittest.TestCase):
+    @staticmethod
+    def _mock_analysis_results():
+        return {
+            "meta_data": {"indexability": {"can_be_indexed": True, "warnings": [], "blockers": []}},
+            "meta_score": 75.0,
+            "content_data": {},
+            "content_score": 75.0,
+            "link_data": {},
+            "link_score": 75.0,
+            "tech_data": {"indexability": {"can_be_indexed": True, "warnings": [], "blockers": []}},
+            "tech_score": 75.0,
+            "warnings": [],
+            "issues": [],
+            "overall_score": 75.0,
+        }
+
     def test_content_analysis_does_not_remove_links_from_other_analyzers(self):
         results = analyze_html_document(HTML_WITH_NAV_AND_FOOTER, BASE_URL, load_time=1.5)
         self.assertEqual(results["link_data"]["internal_count"], 4)
@@ -227,6 +244,134 @@ class SeoAnalysisTests(unittest.TestCase):
     def test_low_value_meta_tags_do_not_create_strong_meta_score(self):
         results = analyze_html_document(HTML_WITH_LOW_VALUE_META_ONLY, BASE_URL, load_time=1.5)
         self.assertLess(results["meta_score"], 30)
+
+    def test_should_attempt_rendered_fetch_detects_client_rendered_shell(self):
+        html = """
+<!doctype html>
+<html>
+<head>
+  <script src="/static/runtime.js"></script>
+  <script src="/static/vendors.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/chunk-1.js"></script>
+  <script src="/static/chunk-2.js"></script>
+  <script src="/static/chunk-3.js"></script>
+  <script src="/static/chunk-4.js"></script>
+  <script src="/static/chunk-5.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>
+"""
+        self.assertTrue(should_attempt_rendered_fetch(html))
+
+    @patch("seo_analysis.analyze_html_document")
+    @patch("seo_analysis.fetch_content_rendered")
+    @patch("seo_analysis.fetch_content_static")
+    def test_auto_mode_upgrades_to_rendered_fetch_when_shell_detected(
+        self,
+        mock_fetch_static,
+        mock_fetch_rendered,
+        mock_analyze_html_document,
+    ):
+        static_html = b"""
+<!doctype html>
+<html><head><script src="/app.js"></script><script src="/a.js"></script><script src="/b.js"></script>
+<script src="/c.js"></script><script src="/d.js"></script><script src="/e.js"></script><script src="/f.js"></script>
+<script src="/g.js"></script><script src="/h.js"></script><script src="/i.js"></script></head>
+<body><div id="root"></div></body></html>
+"""
+        rendered_html = b"<html><head><title>Rendered page</title></head><body><main><h1>Loaded</h1></main></body></html>"
+        mock_fetch_static.return_value = (
+            static_html,
+            BASE_URL,
+            1.0,
+            None,
+            [],
+            {"content-type": "text/html; charset=utf-8"},
+        )
+        mock_fetch_rendered.return_value = (
+            rendered_html,
+            BASE_URL,
+            2.0,
+            None,
+            ["Rendered fetch warning"],
+            {"content-type": "text/html; charset=utf-8"},
+        )
+        mock_analyze_html_document.return_value = self._mock_analysis_results()
+
+        results = analyze_url(BASE_URL, fetch_mode="auto")
+
+        self.assertEqual(results["fetch_strategy"], "rendered")
+        self.assertTrue(results["render_recommended"])
+        self.assertIn("Static HTML looks like a client-rendered shell", " ".join(results["warnings"]))
+        self.assertIn("Rendered fetch warning", results["warnings"])
+        mock_fetch_rendered.assert_called_once_with(BASE_URL)
+        analyzed_html = mock_analyze_html_document.call_args.args[0]
+        self.assertEqual(analyzed_html, rendered_html)
+
+    @patch("seo_analysis.analyze_html_document")
+    @patch("seo_analysis.fetch_content_rendered")
+    @patch("seo_analysis.fetch_content_static")
+    def test_auto_mode_falls_back_to_static_when_rendered_fetch_fails(
+        self,
+        mock_fetch_static,
+        mock_fetch_rendered,
+        mock_analyze_html_document,
+    ):
+        static_html = b"""
+<!doctype html>
+<html><head><script src="/app.js"></script><script src="/a.js"></script><script src="/b.js"></script>
+<script src="/c.js"></script><script src="/d.js"></script><script src="/e.js"></script><script src="/f.js"></script>
+<script src="/g.js"></script><script src="/h.js"></script><script src="/i.js"></script></head>
+<body><div id="root"></div></body></html>
+"""
+        mock_fetch_static.return_value = (
+            static_html,
+            BASE_URL,
+            1.0,
+            None,
+            [],
+            {"content-type": "text/html; charset=utf-8"},
+        )
+        mock_fetch_rendered.return_value = (
+            None,
+            BASE_URL,
+            None,
+            "Playwright unavailable",
+            [],
+            {},
+        )
+        mock_analyze_html_document.return_value = self._mock_analysis_results()
+
+        results = analyze_url(BASE_URL, fetch_mode="auto")
+
+        self.assertEqual(results["fetch_strategy"], "static")
+        self.assertTrue(results["render_recommended"])
+        self.assertIn("Rendered analysis was unavailable; using static HTML fallback.", " ".join(results["warnings"]))
+        analyzed_html = mock_analyze_html_document.call_args.args[0]
+        self.assertEqual(analyzed_html, static_html)
+
+    @patch("seo_analysis.analyze_html_document")
+    @patch("seo_analysis.fetch_content_rendered")
+    def test_rendered_mode_uses_rendered_fetch_directly(self, mock_fetch_rendered, mock_analyze_html_document):
+        rendered_html = b"<html><head><title>Rendered page</title></head><body><main><h1>Loaded</h1></main></body></html>"
+        mock_fetch_rendered.return_value = (
+            rendered_html,
+            BASE_URL,
+            2.0,
+            None,
+            [],
+            {"content-type": "text/html; charset=utf-8"},
+        )
+        mock_analyze_html_document.return_value = self._mock_analysis_results()
+
+        results = analyze_url(BASE_URL, fetch_mode="rendered")
+
+        self.assertEqual(results["fetch_strategy"], "rendered")
+        self.assertFalse(results["render_recommended"])
+        mock_fetch_rendered.assert_called_once_with(BASE_URL)
 
 
 if __name__ == "__main__":

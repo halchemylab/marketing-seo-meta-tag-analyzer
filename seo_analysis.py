@@ -3,11 +3,19 @@ import re
 import time
 from collections import Counter
 from copy import deepcopy
+from html import unescape
 from urllib.parse import urljoin, urlparse
 
 import requests
 import textstat
 from bs4 import BeautifulSoup
+
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except ImportError:  # pragma: no cover - exercised via integration behavior
+    PlaywrightTimeoutError = None
+    sync_playwright = None
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -15,6 +23,9 @@ USER_AGENT = (
 )
 HEADERS = {"User-Agent": USER_AGENT}
 REQUEST_TIMEOUT = 15
+RENDER_WAIT_TIMEOUT_MS = 15000
+RENDER_NETWORK_IDLE_TIMEOUT_MS = 5000
+RENDER_SETTLE_DELAY_MS = 750
 MIN_CONTENT_LENGTH_WORDS = 300
 GOOD_LOAD_TIME_THRESHOLD = 2.0
 OK_LOAD_TIME_THRESHOLD = 4.0
@@ -43,6 +54,10 @@ def is_valid_url(url):
 
 
 def fetch_content(url):
+    return fetch_content_static(url)
+
+
+def fetch_content_static(url):
     warnings = []
     try:
         start_time = time.time()
@@ -67,6 +82,115 @@ def fetch_content(url):
         return None, url, None, f"Error fetching URL: {exc}", warnings, {}
     except Exception as exc:
         return None, url, None, f"An unexpected error occurred during fetch: {exc}", warnings, {}
+
+
+def can_use_rendered_fetch():
+    return sync_playwright is not None and PlaywrightTimeoutError is not None
+
+
+def extract_title_from_html(html_content):
+    if not html_content:
+        return ""
+    if isinstance(html_content, bytes):
+        html_content = html_content.decode("utf-8", errors="ignore")
+    match = re.search(r"<title[^>]*>(.*?)</title>", html_content, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return unescape(re.sub(r"\s+", " ", match.group(1))).strip()
+
+
+def should_attempt_rendered_fetch(html_content):
+    if not html_content:
+        return False
+
+    soup = parse_html(html_content)
+    raw_text = soup.get_text(" ", strip=True)
+    visible_word_count = len(tokenize_text(raw_text))
+    script_count = len(soup.find_all("script"))
+    heading_count = len(soup.find_all(["h1", "h2", "h3"]))
+    title = extract_title_from_html(html_content)
+    meta_description = soup.find("meta", attrs={"name": "description"})
+    body = soup.find("body") or soup
+
+    app_shell_selectors = [
+        {"id": re.compile(r"^(app|root|__next|__nuxt)$", re.I)},
+        {"data-reactroot": True},
+        {"ng-version": True},
+    ]
+    has_app_shell_marker = any(body.find(attrs=selector) for selector in app_shell_selectors)
+
+    scripted_shell_text = body.get_text(" ", strip=True).lower()
+    shell_phrases = {
+        "enable javascript",
+        "loading...",
+        "please wait",
+        "app loading",
+    }
+    has_shell_phrase = any(phrase in scripted_shell_text for phrase in shell_phrases)
+
+    sparse_shell = visible_word_count < 120 and script_count >= 8 and heading_count == 0
+    weak_metadata = not title and meta_description is None and script_count >= 10
+    return has_app_shell_marker or has_shell_phrase or sparse_shell or weak_metadata
+
+
+def fetch_content_rendered(url):
+    warnings = []
+    if not can_use_rendered_fetch():
+        return (
+            None,
+            url,
+            None,
+            "Rendered analysis requires Playwright. Install `playwright` and run `playwright install chromium`.",
+            warnings,
+            {},
+        )
+
+    browser = None
+    try:
+        start_time = time.time()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1440, "height": 900},
+                ignore_https_errors=True,
+            )
+            page = context.new_page()
+            response = page.goto(url, wait_until="domcontentloaded", timeout=RENDER_WAIT_TIMEOUT_MS)
+            try:
+                page.wait_for_load_state("networkidle", timeout=RENDER_NETWORK_IDLE_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                warnings.append(
+                    "Rendered analysis did not reach network idle before timeout; using the best available DOM snapshot."
+                )
+            page.wait_for_timeout(RENDER_SETTLE_DELAY_MS)
+            html_content = page.content().encode("utf-8")
+            final_url = page.url
+            load_time = time.time() - start_time
+            response_headers = response.headers if response else {}
+            content_type = response_headers.get("content-type", "").lower()
+            if content_type and "text/html" not in content_type:
+                warnings.append(
+                    f"Rendered response content type is '{content_type}', not 'text/html'. Analysis might be limited."
+                )
+            context.close()
+            browser.close()
+            browser = None
+            return html_content, final_url, load_time, None, warnings, response_headers
+    except PlaywrightTimeoutError:
+        return (
+            None,
+            url,
+            None,
+            f"Rendered analysis timed out after {RENDER_WAIT_TIMEOUT_MS / 1000:.0f} seconds.",
+            warnings,
+            {},
+        )
+    except Exception as exc:
+        return None, url, None, f"Error during rendered analysis: {exc}", warnings, {}
+    finally:
+        if browser is not None:
+            browser.close()
 
 
 def parse_html(html_content):
@@ -1240,8 +1364,38 @@ def analyze_html_document(html_content, url, load_time=None, response_headers=No
     }
 
 
-def analyze_url(url):
-    html_content, final_url, load_time, fetch_error, warnings, response_headers = fetch_content(url)
+def analyze_url(url, fetch_mode="auto"):
+    selected_mode = (fetch_mode or "auto").lower()
+    if selected_mode not in {"auto", "static", "rendered"}:
+        raise ValueError("fetch_mode must be one of: auto, static, rendered")
+
+    html_content, final_url, load_time, fetch_error, warnings, response_headers = fetch_content_static(url)
+    fetch_strategy = "static"
+    render_recommended = False
+
+    if selected_mode == "rendered":
+        html_content, final_url, load_time, fetch_error, warnings, response_headers = fetch_content_rendered(url)
+        fetch_strategy = "rendered"
+    elif fetch_error is None and html_content is not None and selected_mode == "auto":
+        render_recommended = should_attempt_rendered_fetch(html_content)
+        if render_recommended:
+            warnings.append(
+                "Static HTML looks like a client-rendered shell; attempting rendered analysis for a more complete DOM snapshot."
+            )
+            rendered_result = fetch_content_rendered(url)
+            rendered_html, rendered_url, rendered_load_time, rendered_error, rendered_warnings, rendered_headers = rendered_result
+            warnings.extend(rendered_warnings)
+            if rendered_error is None and rendered_html is not None:
+                html_content = rendered_html
+                final_url = rendered_url
+                load_time = rendered_load_time
+                response_headers = rendered_headers
+                fetch_strategy = "rendered"
+            else:
+                warnings.append(
+                    f"Rendered analysis was unavailable; using static HTML fallback. Reason: {rendered_error}"
+                )
+
     if fetch_error or html_content is None:
         return {
             "html_content": html_content,
@@ -1250,6 +1404,8 @@ def analyze_url(url):
             "fetch_error": fetch_error,
             "warnings": warnings,
             "response_headers": response_headers,
+            "fetch_strategy": fetch_strategy,
+            "render_recommended": render_recommended,
         }
 
     content_type = (response_headers or {}).get("content-type", "").lower()
@@ -1261,13 +1417,16 @@ def analyze_url(url):
         is_html_document="text/html" in content_type,
     )
     warnings.extend(analysis_results["warnings"])
+    combined_results = dict(analysis_results)
+    combined_results["warnings"] = warnings
 
     return {
         "html_content": html_content,
         "final_url": final_url,
         "load_time": load_time,
         "fetch_error": None,
-        "warnings": warnings,
         "response_headers": response_headers,
-        **analysis_results,
+        "fetch_strategy": fetch_strategy,
+        "render_recommended": render_recommended,
+        **combined_results,
     }
