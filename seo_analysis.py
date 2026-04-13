@@ -1,622 +1,58 @@
 import json
-import re
-import time
 from collections import Counter
-from copy import deepcopy
-from html import unescape
 from urllib.parse import urljoin, urlparse
 
 import requests
 import textstat
-from bs4 import BeautifulSoup
 
-try:
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
-except ImportError:  # pragma: no cover - exercised via integration behavior
-    PlaywrightTimeoutError = None
-    sync_playwright = None
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+from seo_fetch import (
+    fetch_content,
+    fetch_content_rendered,
+    fetch_content_static,
+    should_attempt_rendered_fetch,
 )
-HEADERS = {"User-Agent": USER_AGENT}
-REQUEST_TIMEOUT = 15
-RENDER_WAIT_TIMEOUT_MS = 15000
-RENDER_NETWORK_IDLE_TIMEOUT_MS = 5000
-RENDER_SETTLE_DELAY_MS = 750
-MIN_CONTENT_LENGTH_WORDS = 300
-GOOD_LOAD_TIME_THRESHOLD = 2.0
-OK_LOAD_TIME_THRESHOLD = 4.0
-GOOD_READABILITY_THRESHOLD = 60
-MAX_KEYWORDS_TO_SHOW = 10
-TITLE_MIN_LENGTH = 15
-TITLE_MAX_LENGTH = 60
-DESCRIPTION_MIN_LENGTH = 70
-DESCRIPTION_MAX_LENGTH = 160
-PAGE_TYPE_CONTENT_THRESHOLDS = {
-    "homepage": 60,
-    "product": 60,
-    "category": 80,
-    "article": 300,
-    "documentation": 180,
-    "generic": 150,
-}
-
-
-def is_valid_url(url):
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
-
-
-def fetch_content(url):
-    return fetch_content_static(url)
-
-
-def fetch_content_static(url):
-    warnings = []
-    try:
-        start_time = time.time()
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True,
-        )
-        end_time = time.time()
-        load_time = end_time - start_time
-        response.raise_for_status()
-        content_type = response.headers.get("content-type", "").lower()
-        if "text/html" not in content_type:
-            warnings.append(
-                f"Content type is '{content_type}', not 'text/html'. Analysis might be limited."
-            )
-        return response.content, response.url, load_time, None, warnings, response.headers
-    except requests.exceptions.Timeout:
-        return None, url, None, f"Error: Request timed out after {REQUEST_TIMEOUT} seconds.", warnings, {}
-    except requests.exceptions.RequestException as exc:
-        return None, url, None, f"Error fetching URL: {exc}", warnings, {}
-    except Exception as exc:
-        return None, url, None, f"An unexpected error occurred during fetch: {exc}", warnings, {}
-
-
-def can_use_rendered_fetch():
-    return sync_playwright is not None and PlaywrightTimeoutError is not None
-
-
-def extract_title_from_html(html_content):
-    if not html_content:
-        return ""
-    if isinstance(html_content, bytes):
-        html_content = html_content.decode("utf-8", errors="ignore")
-    match = re.search(r"<title[^>]*>(.*?)</title>", html_content, flags=re.IGNORECASE | re.DOTALL)
-    if not match:
-        return ""
-    return unescape(re.sub(r"\s+", " ", match.group(1))).strip()
-
-
-def should_attempt_rendered_fetch(html_content):
-    if not html_content:
-        return False
-
-    soup = parse_html(html_content)
-    raw_text = soup.get_text(" ", strip=True)
-    visible_word_count = len(tokenize_text(raw_text))
-    script_count = len(soup.find_all("script"))
-    heading_count = len(soup.find_all(["h1", "h2", "h3"]))
-    title = extract_title_from_html(html_content)
-    meta_description = soup.find("meta", attrs={"name": "description"})
-    body = soup.find("body") or soup
-
-    app_shell_selectors = [
-        {"id": re.compile(r"^(app|root|__next|__nuxt)$", re.I)},
-        {"data-reactroot": True},
-        {"ng-version": True},
-    ]
-    has_app_shell_marker = any(body.find(attrs=selector) for selector in app_shell_selectors)
-
-    scripted_shell_text = body.get_text(" ", strip=True).lower()
-    shell_phrases = {
-        "enable javascript",
-        "loading...",
-        "please wait",
-        "app loading",
-    }
-    has_shell_phrase = any(phrase in scripted_shell_text for phrase in shell_phrases)
-
-    sparse_shell = visible_word_count < 120 and script_count >= 8 and heading_count == 0
-    weak_metadata = not title and meta_description is None and script_count >= 10
-    return has_app_shell_marker or has_shell_phrase or sparse_shell or weak_metadata
-
-
-def fetch_content_rendered(url):
-    warnings = []
-    if not can_use_rendered_fetch():
-        return (
-            None,
-            url,
-            None,
-            "Rendered analysis requires Playwright. Install `playwright` and run `playwright install chromium`.",
-            warnings,
-            {},
-        )
-
-    browser = None
-    try:
-        start_time = time.time()
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                viewport={"width": 1440, "height": 900},
-                ignore_https_errors=True,
-            )
-            page = context.new_page()
-            response = page.goto(url, wait_until="domcontentloaded", timeout=RENDER_WAIT_TIMEOUT_MS)
-            try:
-                page.wait_for_load_state("networkidle", timeout=RENDER_NETWORK_IDLE_TIMEOUT_MS)
-            except PlaywrightTimeoutError:
-                warnings.append(
-                    "Rendered analysis did not reach network idle before timeout; using the best available DOM snapshot."
-                )
-            page.wait_for_timeout(RENDER_SETTLE_DELAY_MS)
-            html_content = page.content().encode("utf-8")
-            final_url = page.url
-            load_time = time.time() - start_time
-            response_headers = response.headers if response else {}
-            content_type = response_headers.get("content-type", "").lower()
-            if content_type and "text/html" not in content_type:
-                warnings.append(
-                    f"Rendered response content type is '{content_type}', not 'text/html'. Analysis might be limited."
-                )
-            context.close()
-            browser.close()
-            browser = None
-            return html_content, final_url, load_time, None, warnings, response_headers
-    except PlaywrightTimeoutError:
-        return (
-            None,
-            url,
-            None,
-            f"Rendered analysis timed out after {RENDER_WAIT_TIMEOUT_MS / 1000:.0f} seconds.",
-            warnings,
-            {},
-        )
-    except Exception as exc:
-        return None, url, None, f"Error during rendered analysis: {exc}", warnings, {}
-    finally:
-        if browser is not None:
-            browser.close()
-
-
-def parse_html(html_content):
-    try:
-        return BeautifulSoup(html_content, "lxml")
-    except Exception:
-        return BeautifulSoup(html_content, "html.parser")
-
-
-def get_domain(url):
-    try:
-        return urlparse(url).netloc
-    except Exception:
-        return None
-
-
-def normalize_netloc(netloc):
-    if not netloc:
-        return ""
-    return netloc.lower().split(":")[0].removeprefix("www.")
-
-
-def site_key(netloc):
-    normalized = normalize_netloc(netloc)
-    parts = normalized.split(".")
-    if len(parts) >= 2:
-        return ".".join(parts[-2:])
-    return normalized
-
-
-def is_same_site(url_a, url_b):
-    return site_key(get_domain(url_a)) == site_key(get_domain(url_b))
-
-
-def validate_length(text, min_length, max_length):
-    if not text:
-        return "missing"
-    text_length = len(text.strip())
-    if min_length <= text_length <= max_length:
-        return "good"
-    if text_length < min_length:
-        return "short"
-    return "long"
-
-
-def validate_canonical_url(page_url, canonical_url):
-    if not canonical_url:
-        return "missing"
-    parsed = urlparse(canonical_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return "invalid"
-    if parsed.fragment:
-        return "invalid"
-    if not is_same_site(page_url, canonical_url):
-        return "cross_domain"
-    return "good"
-
-
-def normalize_url_for_comparison(url):
-    parsed = urlparse(url)
-    normalized_path = parsed.path or "/"
-    if normalized_path != "/" and normalized_path.endswith("/"):
-        normalized_path = normalized_path.rstrip("/")
-    return (
-        parsed.scheme.lower(),
-        normalize_netloc(parsed.netloc),
-        normalized_path,
-        parsed.query,
-    )
-
-
-def parse_robots_directives(content):
-    if not content:
-        return set()
-    return {directive.strip().lower() for directive in content.split(",") if directive.strip()}
-
-
-def parse_x_robots_tag(headers):
-    if not headers:
-        return []
-
-    raw_values = []
-    if hasattr(headers, "get_all"):
-        raw_values.extend(headers.get_all("X-Robots-Tag", []))
-
-    header_value = headers.get("X-Robots-Tag")
-    if header_value:
-        raw_values.append(header_value)
-
-    directives = set()
-    for raw_value in raw_values:
-        for part in raw_value.split(","):
-            directive = part.strip().lower()
-            if not directive:
-                continue
-            if ":" in directive:
-                _, directive = directive.split(":", 1)
-                directive = directive.strip()
-            if directive:
-                directives.add(directive)
-    return sorted(directives)
-
-
-def validate_viewport_content(content):
-    if not content:
-        return "missing"
-    normalized = content.replace(" ", "").lower()
-    if "width=device-width" not in normalized:
-        return "invalid"
-    if "initial-scale=1" in normalized:
-        return "good"
-    return "partial"
-
-
-def extract_schema_types(schema_json):
-    schema_types = []
-    if isinstance(schema_json, dict):
-        if "@graph" in schema_json and isinstance(schema_json["@graph"], list):
-            for item in schema_json["@graph"]:
-                schema_types.extend(extract_schema_types(item))
-        schema_type = schema_json.get("@type")
-        if isinstance(schema_type, list):
-            schema_types.extend(str(item) for item in schema_type)
-        elif schema_type:
-            schema_types.append(str(schema_type))
-    elif isinstance(schema_json, list):
-        for item in schema_json:
-            schema_types.extend(extract_schema_types(item))
-    return schema_types
-
-
-def build_issue(category, severity, message, evidence=None, recommendation=None):
-    return {
-        "category": category,
-        "severity": severity,
-        "message": message,
-        "evidence": evidence or {},
-        "recommendation": recommendation,
-    }
-
-
-def clamp_score(value):
-    return max(0.0, min(100.0, value))
-
-
-def clean_text(text):
-    text = text.lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def tokenize_text(text):
-    return [
-        token
-        for token in clean_text(text).split()
-        if len(token) > 2
-    ]
-
-
-def detect_page_type(soup, page_url):
-    path = (urlparse(page_url).path or "/").lower()
-    path_segments = [segment for segment in path.split("/") if segment]
-    body = soup.find("body") or soup
-
-    if path == "/" or body.find("main") and len(path_segments) == 0:
-        return "homepage"
-    if body.find("article") or soup.find("meta", attrs={"property": "article:published_time"}):
-        return "article"
-    if body.find(attrs={"itemtype": re.compile("product", re.I)}) or re.search(
-        r"(add to cart|buy now|\$\d|usd|price)",
-        body.get_text(" ", strip=True),
-        re.I,
-    ):
-        return "product"
-    if any(segment in {"docs", "documentation", "guide", "api"} for segment in path_segments) or body.find_all(["pre", "code"]):
-        return "documentation"
-    if any(segment in {"category", "collections", "shop", "products"} for segment in path_segments):
-        return "category"
-    if len(body.find_all("a", href=True)) >= 20 and len(body.find_all(["h2", "h3"])) >= 3:
-        return "category"
-    return "generic"
-
-
-def get_primary_content_root(soup):
-    primary_selectors = [
-        ("main", {}),
-        ("article", {}),
-        ("div", {"role": "main"}),
-        ("section", {"role": "main"}),
-    ]
-    for tag_name, attrs in primary_selectors:
-        root = soup.find(tag_name, attrs=attrs)
-        if root:
-            return deepcopy(root), tag_name
-
-    body = soup.find("body")
-    if body:
-        return deepcopy(body), "body"
-    return None, None
-
-
-def count_content_words(text):
-    return len([word for word in text.split() if word])
-
-
-def assess_title_h1_alignment(title, h1_text):
-    if not title or not h1_text:
-        return {"status": "missing", "overlap_ratio": 0.0, "shared_terms": []}
-
-    title_terms = set(tokenize_text(title))
-    h1_terms = set(tokenize_text(h1_text))
-    if not title_terms or not h1_terms:
-        return {"status": "missing", "overlap_ratio": 0.0, "shared_terms": []}
-
-    shared_terms = sorted(title_terms & h1_terms)
-    overlap_ratio = len(shared_terms) / max(min(len(title_terms), len(h1_terms)), 1)
-    if overlap_ratio >= 0.5:
-        status = "good"
-    elif overlap_ratio >= 0.2:
-        status = "partial"
-    else:
-        status = "weak"
-    return {"status": status, "overlap_ratio": overlap_ratio, "shared_terms": shared_terms}
-
-
-def find_duplicate_heading_groups(headings):
-    counts = Counter()
-    for heading_values in headings.values():
-        for heading in heading_values:
-            normalized = clean_text(heading)
-            if normalized:
-                counts[normalized] += 1
-    return [
-        {"text": text, "count": count}
-        for text, count in counts.items()
-        if count > 1
-    ]
-
-
-def score_meta_quality(meta_data):
-    score = 0.0
-    title_weights = {"good": 25, "short": 10, "long": 10, "missing": 0}
-    description_weights = {"good": 20, "short": 8, "long": 8, "missing": 0}
-    canonical_weights = {"good": 20, "cross_domain": 2, "invalid": 0, "missing": 5}
-    viewport_weights = {"good": 10, "partial": 5, "invalid": 0, "missing": 0}
-
-    score += title_weights.get(meta_data.get("title_status"), 0)
-    score += description_weights.get(meta_data.get("description_status"), 0)
-    score += canonical_weights.get(meta_data.get("canonical_status"), 0)
-    score += viewport_weights.get(meta_data.get("viewport_status"), 0)
-
-    robots_status = meta_data.get("robots_status")
-    if robots_status == "valid":
-        score += 10
-    elif robots_status == "default":
-        score += 8
-    elif robots_status == "restrictive":
-        score += 0
-
-    if meta_data.get("language"):
-        score += 5
-
-    social_score = 0
-    if meta_data.get("og:title"):
-        social_score += 2
-    if meta_data.get("og:description"):
-        social_score += 2
-    if meta_data.get("og:image"):
-        social_score += 1
-    if meta_data.get("twitter:title"):
-        social_score += 2
-    if meta_data.get("twitter:description"):
-        social_score += 2
-    if meta_data.get("twitter:card"):
-        social_score += 1
-    score += min(social_score, 10)
-
-    return clamp_score(score)
-
-
-def score_content_quality(content_data):
-    score = 0.0
-    h1_count = len(content_data["headings"].get("h1", []))
-    if h1_count == 1:
-        score += 22
-    elif h1_count > 1:
-        score += 10
-
-    if content_data["primary_content_found"]:
-        score += 15
-        if content_data.get("primary_content_selector") in {"main", "article"}:
-            score += 5
-
-    target_word_count = max(content_data.get("target_word_count", 1), 1)
-    word_count_ratio = content_data["word_count"] / target_word_count
-    if word_count_ratio >= 1:
-        score += 20
-    elif word_count_ratio >= 0.75:
-        score += 14
-    elif word_count_ratio >= 0.5:
-        score += 8
-    elif content_data["word_count"] > 0:
-        score += 4
-
-    alignment_status = content_data["title_h1_alignment"]["status"]
-    if alignment_status == "good":
-        score += 15
-    elif alignment_status == "partial":
-        score += 8
-
-    if not content_data["duplicate_headings"]:
-        score += 10
-    elif len(content_data["duplicate_headings"]) == 1:
-        score += 4
-
-    if content_data["page_type"] in {"article", "documentation", "generic"} and content_data["readability_score"] is not None:
-        if content_data["readability_score"] >= GOOD_READABILITY_THRESHOLD:
-            score += 8
-        elif content_data["readability_score"] >= 30:
-            score += 4
-    else:
-        score += 4
-
-    image_total = content_data["image_alt_analysis"]["total"]
-    if image_total == 0:
-        score += 5
-    else:
-        alt_ratio = content_data["image_alt_analysis"]["with_alt"] / image_total
-        if alt_ratio >= 0.9:
-            score += 5
-        elif alt_ratio >= 0.5:
-            score += 3
-
-    return clamp_score(score)
-
-
-def score_link_quality(link_data):
-    total_links = link_data["internal_count"] + link_data["external_count"]
-    if total_links == 0:
-        return 0.0
-
-    score = 0.0
-    if link_data["internal_count"] >= 3:
-        score += 45
-    elif link_data["internal_count"] > 0:
-        score += 25
-
-    if link_data["external_count"] > 0:
-        score += 10
-
-    empty_anchor_ratio = link_data["anchor_texts"]["[Empty Anchor]"] / total_links
-    descriptive_anchor_count = sum(
-        1 for text in link_data["anchor_texts"] if text != "[Empty Anchor]" and len(text.split()) >= 2
-    )
-    if empty_anchor_ratio == 0 and descriptive_anchor_count >= 2:
-        score += 35
-    elif empty_anchor_ratio < 0.2:
-        score += 20
-    elif empty_anchor_ratio < 0.5:
-        score += 10
-
-    if link_data["internal_count"] > 0 and link_data["external_count"] > 0:
-        score += 10
-
-    return clamp_score(score)
-
-
-def score_technical_quality(tech_data):
-    score = 0.0
-    if tech_data["https_status"] == "good":
-        score += 25
-
-    if tech_data["load_time_status"] == "good":
-        score += 20
-    elif tech_data["load_time_status"] == "warning":
-        score += 10
-
-    if tech_data["mobile_friendly"]["status"] == "good":
-        score += 15
-    elif tech_data["mobile_friendly"]["status"] == "warning":
-        score += 8
-
-    if tech_data["robots_txt"]["status"] == "Found":
-        score += 10
-    if "Found" in tech_data["sitemap_xml"]["status"]:
-        score += 15
-    if tech_data["schema_markup"]["present"]:
-        score += 15
-
-    indexability = tech_data["indexability"]
-    if indexability["can_be_indexed"]:
-        score += 10
-    elif len(indexability["blockers"]) == 1:
-        score -= 15
-    else:
-        score -= 25
-
-    return clamp_score(score)
-
-
-def score_indexability(indexability):
-    if not indexability["can_be_indexed"]:
-        return 0.0
-    if indexability["warnings"]:
-        return 75.0
-    return 100.0
-
-
-def compute_overall_score(meta_score, content_score, link_score, tech_score, indexability):
-    overall_score = (
-        score_indexability(indexability) * 0.35
-        + content_score * 0.25
-        + meta_score * 0.20
-        + link_score * 0.10
-        + tech_score * 0.10
-    )
-    if not indexability["can_be_indexed"]:
-        overall_score = min(overall_score, 35.0)
-    elif indexability["warnings"]:
-        overall_score = min(overall_score, 85.0)
-    return clamp_score(overall_score)
+from seo_models import AnalysisResult, IndexabilityDict, IssueDict
+from seo_scoring import (
+    compute_overall_score,
+    score_content_quality,
+    score_link_quality,
+    score_meta_quality,
+    score_technical_quality,
+)
+from seo_utils import (
+    DESCRIPTION_MAX_LENGTH,
+    DESCRIPTION_MIN_LENGTH,
+    GOOD_LOAD_TIME_THRESHOLD,
+    GOOD_READABILITY_THRESHOLD,
+    HEADERS,
+    MAX_KEYWORDS_TO_SHOW,
+    OK_LOAD_TIME_THRESHOLD,
+    PAGE_TYPE_CONTENT_THRESHOLDS,
+    TITLE_MAX_LENGTH,
+    TITLE_MIN_LENGTH,
+    assess_title_h1_alignment,
+    build_issue,
+    clean_text,
+    count_content_words,
+    detect_page_type,
+    extract_schema_types,
+    find_duplicate_heading_groups,
+    get_domain,
+    get_primary_content_root,
+    is_valid_url,
+    normalize_url_for_comparison,
+    parse_html,
+    parse_robots_directives,
+    parse_x_robots_tag,
+    site_key,
+    validate_canonical_url,
+    validate_length,
+    validate_viewport_content,
+)
 
 
 def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_document=True):
-    indexability = {
+    indexability: IndexabilityDict = {
         "can_be_indexed": True,
         "status": "indexable",
         "blockers": [],
@@ -750,11 +186,7 @@ def analyze_meta_tags(soup, url):
         content = tag.get("content")
         if prop and content:
             meta_data[prop] = content.strip()
-    if (
-        meta_data.get("og:title")
-        and meta_data.get("og:description")
-        and meta_data.get("og:image")
-    ):
+    if meta_data.get("og:title") and meta_data.get("og:description") and meta_data.get("og:image"):
         scoring["points"] += 3
 
     twitter_tags = soup.find_all("meta", attrs={"name": lambda value: value and value.startswith("twitter:")})
@@ -915,60 +347,11 @@ def analyze_on_page_content(soup, meta_data, page_url):
         cleaned_text = clean_text(content_data["text_content"])
         words = cleaned_text.split()
         stop_words = {
-            "a",
-            "an",
-            "the",
-            "and",
-            "or",
-            "but",
-            "is",
-            "in",
-            "it",
-            "of",
-            "to",
-            "on",
-            "for",
-            "with",
-            "as",
-            "by",
-            "at",
-            "this",
-            "that",
-            "i",
-            "you",
-            "he",
-            "she",
-            "we",
-            "they",
-            "be",
-            "are",
-            "was",
-            "were",
-            "has",
-            "have",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "shall",
-            "should",
-            "can",
-            "could",
-            "may",
-            "might",
-            "must",
-            "not",
-            "no",
-            "so",
-            "if",
-            "me",
-            "my",
-            "your",
-            "our",
-            "its",
-            "-",
-            "",
+            "a", "an", "the", "and", "or", "but", "is", "in", "it", "of", "to", "on", "for", "with",
+            "as", "by", "at", "this", "that", "i", "you", "he", "she", "we", "they", "be", "are",
+            "was", "were", "has", "have", "had", "do", "does", "did", "will", "shall", "should",
+            "can", "could", "may", "might", "must", "not", "no", "so", "if", "me", "my", "your",
+            "our", "its", "-", "",
         }
         meaningful_words = [word for word in words if word not in stop_words and len(word) > 2]
         if meaningful_words:
@@ -998,14 +381,10 @@ def analyze_on_page_content(soup, meta_data, page_url):
         src = img.get("src", "No Source")
         if alt_text:
             content_data["image_alt_analysis"]["with_alt"] += 1
-            content_data["image_alt_analysis"]["alt_tags"].append(
-                {"src": src, "alt": alt_text, "status": "present"}
-            )
+            content_data["image_alt_analysis"]["alt_tags"].append({"src": src, "alt": alt_text, "status": "present"})
         else:
             content_data["image_alt_analysis"]["missing_alt"] += 1
-            content_data["image_alt_analysis"]["alt_tags"].append(
-                {"src": src, "alt": None, "status": "missing"}
-            )
+            content_data["image_alt_analysis"]["alt_tags"].append({"src": src, "alt": None, "status": "missing"})
 
     if content_data["image_alt_analysis"]["total"] > 0:
         alt_percentage = (
@@ -1069,10 +448,7 @@ def analyze_links(soup, base_url):
         scoring["points"] += 5
         if link_data["internal_count"] > 0 and link_data["external_count"] > 0 and total_links > 5:
             scoring["points"] += 5
-        if (
-            len(link_data["anchor_texts"]) > 3
-            and link_data["anchor_texts"]["[Empty Anchor]"] < total_links * 0.5
-        ):
+        if len(link_data["anchor_texts"]) > 3 and link_data["anchor_texts"]["[Empty Anchor]"] < total_links * 0.5:
             scoring["points"] += 5
         elif len(link_data["anchor_texts"]) > 1:
             scoring["points"] += 2
@@ -1227,7 +603,7 @@ def analyze_technical_seo(url, soup, load_time, meta_data, response_headers=None
 
 
 def generate_issues(meta_data, content_data, link_data, tech_data):
-    issues = []
+    issues: list[IssueDict] = []
     indexability = tech_data["indexability"]
 
     if not indexability["can_be_indexed"]:
@@ -1323,12 +699,12 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
     return issues
 
 
-def analyze_html_document(html_content, url, load_time=None, response_headers=None, is_html_document=True):
+def analyze_html_document(html_content, url, load_time=None, response_headers=None, is_html_document=True) -> AnalysisResult:
     soup = parse_html(html_content)
     meta_data, _ = analyze_meta_tags(soup, url)
     content_data, _ = analyze_on_page_content(soup, meta_data, url)
     link_data, _ = analyze_links(soup, url)
-    tech_data, tech_score, warnings = analyze_technical_seo(
+    tech_data, _, warnings = analyze_technical_seo(
         url,
         soup,
         load_time,
