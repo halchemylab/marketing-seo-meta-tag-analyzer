@@ -2,6 +2,17 @@ import streamlit as st
 
 from seo_analysis import GOOD_READABILITY_THRESHOLD, MAX_KEYWORDS_TO_SHOW, analyze_url, is_valid_url
 from seo_audit import run_site_audit
+from seo_storage import (
+    add_monitor,
+    build_single_page_scan_record,
+    build_site_audit_scan_record,
+    compare_scan_records,
+    find_previous_scan,
+    get_monitor_status,
+    get_monitors,
+    get_scan_history,
+    save_scan_record,
+)
 
 MAX_LINKS_TO_SHOW = 15
 SITE_AUDIT_MAX_URLS = 100
@@ -454,6 +465,118 @@ def render_duplicate_section(label, groups):
             st.caption(f"...and {group['count'] - 5} more")
 
 
+def render_comparison_panel(record, comparison):
+    st.subheader("History & Regression Check")
+    st.caption(f"Snapshot saved at `{record['created_at']}`")
+    if comparison is None:
+        st.info("This is the first saved snapshot for this target. Run it again later to compare changes.")
+        return
+
+    if comparison["has_regressions"]:
+        st.warning("Compared with the previous saved scan, this target has measurable regressions.")
+    else:
+        st.success("Compared with the previous saved scan, no regressions were detected.")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Average Score Delta", f"{comparison['average_score_delta']:+.1f}")
+    with col2:
+        st.metric("Non-Indexable Delta", f"{comparison['non_indexable_delta']:+d}")
+    with col3:
+        st.metric("Coverage Delta", f"{comparison['pages_analyzed_delta']:+d}")
+
+    if comparison["newly_non_indexable"]:
+        st.markdown("**Newly Non-Indexable URLs**")
+        for url in comparison["newly_non_indexable"][:10]:
+            st.markdown(f"- `{url}`")
+
+    if comparison["score_drops"]:
+        st.markdown("**Largest Score Drops**")
+        for item in comparison["score_drops"]:
+            st.markdown(f"- `{item['url']}` ({item['delta']:+.1f})")
+
+    if comparison["missing_field_regressions"]:
+        st.markdown("**New Missing Metadata**")
+        for field, urls in comparison["missing_field_regressions"].items():
+            st.markdown(f"- {field.replace('_', ' ').title()}: {len(urls)} new page(s)")
+
+    duplicate_regressions = {key: value for key, value in comparison["duplicate_delta"].items() if value > 0}
+    if duplicate_regressions:
+        st.markdown("**Duplicate Signal Increases**")
+        for key, value in duplicate_regressions.items():
+            st.markdown(f"- {key.title()}: +{value}")
+
+
+def render_monitor_action(record):
+    monitor_name = record["target"]
+    existing_keys = {monitor["target_key"] for monitor in get_monitors()}
+    if record["target_key"] in existing_keys:
+        st.caption("This target is already in the monitoring watchlist.")
+        return
+
+    if st.button("Add Current Target To Monitoring Watchlist", key=f"watch_{record['id']}"):
+        add_monitor(
+            monitor_name,
+            record["scan_kind"],
+            record["target"],
+            record["config"],
+        )
+        st.success("Saved to monitoring watchlist.")
+
+
+def render_sidebar():
+    with st.sidebar:
+        st.subheader("Saved Scans")
+        history = get_scan_history(limit=8)
+        if history:
+            for scan in history:
+                summary = scan["summary"]
+                st.markdown(
+                    f"**{scan['scan_kind'].replace('_', ' ').title()}**  \n"
+                    f"`{scan['target']}`  \n"
+                    f"Score: `{summary['average_score']:.1f}` | Pages: `{summary['pages_analyzed']}`"
+                )
+        else:
+            st.caption("No saved scans yet.")
+
+        st.markdown("---")
+        st.subheader("Monitoring")
+        monitors = get_monitors()
+        if not monitors:
+            st.caption("No monitored targets yet.")
+            return
+
+        for monitor in monitors[:8]:
+            status = get_monitor_status(monitor)
+            state_label = {
+                "no-data": "No data",
+                "baseline": "Baseline only",
+                "stable": "Stable",
+                "regression": "Regression",
+            }[status["state"]]
+            state_icon = {
+                "no-data": "ℹ️",
+                "baseline": "ℹ️",
+                "stable": "✅",
+                "regression": "⚠️",
+            }[status["state"]]
+            st.markdown(f"**{state_icon} {monitor['name']}**  \n`{state_label}`")
+            if status["latest_scan"]:
+                latest = status["latest_scan"]["summary"]
+                st.caption(
+                    f"Latest score {latest['average_score']:.1f} across {latest['pages_analyzed']} page(s)."
+                )
+
+
+def persist_scan(record, payload_key, payload):
+    previous = find_previous_scan(record)
+    save_scan_record(record)
+    comparison = compare_scan_records(record, previous)
+    st.session_state[f"{payload_key}_record"] = record
+    st.session_state[f"{payload_key}_comparison"] = comparison
+    st.session_state[payload_key] = payload
+
+
 def render_site_audit_results(report):
     for warning in report["warnings"]:
         st.warning(warning)
@@ -564,6 +687,7 @@ def render_site_audit_results(report):
 
 
 st.set_page_config(page_title="Comprehensive SEO Parser", layout="wide", initial_sidebar_state="collapsed")
+render_sidebar()
 
 st.title("📊 Comprehensive SEO Parser")
 st.markdown("Analyze a single page or audit a batch of URLs from the same site.")
@@ -600,7 +724,16 @@ if scope == "Single Page":
                 st.error(results["fetch_error"])
                 st.stop()
 
-            render_single_page_results(url_input, results)
+            record = build_single_page_scan_record(url_input, results, analysis_mode[0])
+            persist_scan(record, "single_results", results)
+
+    if st.session_state.get("single_results"):
+        render_comparison_panel(
+            st.session_state["single_results_record"],
+            st.session_state["single_results_comparison"],
+        )
+        render_monitor_action(st.session_state["single_results_record"])
+        render_single_page_results(url_input or st.session_state["single_results_record"]["target"], st.session_state["single_results"])
 else:
     audit_target = st.text_input(
         "Enter a homepage, section URL, or sitemap URL:",
@@ -632,7 +765,16 @@ else:
                     max_urls=max_urls,
                     fetch_mode=analysis_mode[0],
                 )
-            render_site_audit_results(report)
+            record = build_site_audit_scan_record(report)
+            persist_scan(record, "site_report", report)
+
+    if st.session_state.get("site_report"):
+        render_comparison_panel(
+            st.session_state["site_report_record"],
+            st.session_state["site_report_comparison"],
+        )
+        render_monitor_action(st.session_state["site_report_record"])
+        render_site_audit_results(st.session_state["site_report"])
 
 st.markdown("---")
 st.caption("Disclaimer: This tool mixes validated HTML checks with heuristic SEO signals. Use the score as a guide, not a substitute for manual review or rendered-page testing.")
