@@ -127,6 +127,14 @@ def score_link_quality(link_data: dict) -> float:
     if link_data["internal_count"] > 0 and link_data["external_count"] > 0:
         score += 10
 
+    live_status = link_data.get("live_status", {})
+    if live_status.get("checked"):
+        if live_status.get("broken_count", 0) == 0 and live_status.get("warning_count", 0) == 0:
+            score += 10
+        else:
+            score -= live_status.get("broken_count", 0) * 7
+            score -= live_status.get("warning_count", 0) * 2
+
     return clamp_score(score)
 
 
@@ -151,6 +159,10 @@ def score_technical_quality(tech_data: dict) -> float:
         score += 15
     if tech_data["schema_markup"]["present"]:
         score += 15
+    if tech_data["performance_hints"]["status"] == "good":
+        score += 5
+    elif tech_data["performance_hints"]["status"] == "warning":
+        score += 2
 
     indexability = tech_data["indexability"]
     if indexability["can_be_indexed"]:

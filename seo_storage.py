@@ -62,7 +62,12 @@ def build_scan_record(
     }
 
 
-def build_single_page_scan_record(url: str, result: dict[str, Any], fetch_mode: str) -> dict[str, Any]:
+def build_single_page_scan_record(
+    url: str,
+    result: dict[str, Any],
+    fetch_mode: str,
+    validate_live_links: bool = False,
+) -> dict[str, Any]:
     page = summarize_page_result(result, url)
     summary = build_site_audit_summary([page])
     summary["fetch_strategy"] = result.get("fetch_strategy", "static")
@@ -72,7 +77,7 @@ def build_single_page_scan_record(url: str, result: dict[str, Any], fetch_mode: 
         page["final_url"],
         [page],
         summary,
-        {"fetch_mode": fetch_mode},
+        {"fetch_mode": fetch_mode, "validate_live_links": validate_live_links},
         source="single",
     )
 

@@ -26,9 +26,17 @@ from seo_utils import (
     GOOD_LOAD_TIME_THRESHOLD,
     GOOD_READABILITY_THRESHOLD,
     HEADERS,
+    LIVE_LINK_CHECK_TIMEOUT,
     MAX_KEYWORDS_TO_SHOW,
+    MAX_LIVE_LINK_CHECKS,
     OK_LOAD_TIME_THRESHOLD,
     PAGE_TYPE_CONTENT_THRESHOLDS,
+    RESOURCE_BAD_DOM_ELEMENTS,
+    RESOURCE_BAD_HTML_BYTES,
+    RESOURCE_BAD_SCRIPT_COUNT,
+    RESOURCE_WARNING_DOM_ELEMENTS,
+    RESOURCE_WARNING_HTML_BYTES,
+    RESOURCE_WARNING_SCRIPT_COUNT,
     TITLE_MAX_LENGTH,
     TITLE_MIN_LENGTH,
     assess_title_h1_alignment,
@@ -161,6 +169,141 @@ def build_social_previews(meta_data: dict[str, str | list | None], page_url: str
         "label": "X / Twitter Card",
     }
     return {"open_graph": open_graph_preview, "twitter": twitter_preview}
+
+
+def inspect_page_resources(
+    html_content: str | bytes,
+    soup,
+    response_headers: dict[str, str] | None = None,
+) -> dict[str, str | int | float | list[str] | None]:
+    if isinstance(html_content, str):
+        html_bytes = html_content.encode("utf-8", errors="ignore")
+    else:
+        html_bytes = html_content
+
+    html_size_bytes = len(html_bytes)
+    dom_elements = len(soup.find_all(True))
+    script_count = len(soup.find_all("script", src=True))
+    stylesheet_count = len(
+        soup.find_all("link", rel=lambda value: value and "stylesheet" in str(value).lower())
+    )
+    image_count = len(soup.find_all("img"))
+    transfer_header = (response_headers or {}).get("content-length")
+    transfer_size_bytes = int(transfer_header) if transfer_header and transfer_header.isdigit() else None
+    notes: list[str] = []
+    status = "good"
+
+    if html_size_bytes >= RESOURCE_BAD_HTML_BYTES:
+        notes.append("HTML response is heavy and may delay parsing.")
+        status = "bad"
+    elif html_size_bytes >= RESOURCE_WARNING_HTML_BYTES:
+        notes.append("HTML response is larger than typical SEO landing pages.")
+        status = "warning"
+
+    if dom_elements >= RESOURCE_BAD_DOM_ELEMENTS:
+        notes.append("DOM is very large and may slow rendering.")
+        status = "bad"
+    elif dom_elements >= RESOURCE_WARNING_DOM_ELEMENTS and status == "good":
+        notes.append("DOM is fairly large for a single page.")
+        status = "warning"
+
+    if script_count >= RESOURCE_BAD_SCRIPT_COUNT:
+        notes.append("Many external scripts were detected.")
+        status = "bad"
+    elif script_count >= RESOURCE_WARNING_SCRIPT_COUNT and status == "good":
+        notes.append("External script count is high.")
+        status = "warning"
+
+    if not notes:
+        notes.append("HTML size, DOM size, and script count look reasonable.")
+
+    return {
+        "html_size_bytes": html_size_bytes,
+        "html_size_kb": round(html_size_bytes / 1024, 1),
+        "transfer_size_bytes": transfer_size_bytes,
+        "transfer_size_kb": round(transfer_size_bytes / 1024, 1) if transfer_size_bytes else None,
+        "dom_elements": dom_elements,
+        "script_count": script_count,
+        "stylesheet_count": stylesheet_count,
+        "image_count": image_count,
+        "status": status,
+        "notes": notes,
+    }
+
+
+def validate_live_link_targets(links_all: list[dict[str, str]], max_links: int = MAX_LIVE_LINK_CHECKS) -> dict[str, object]:
+    summary = {
+        "checked": False,
+        "checked_count": 0,
+        "healthy_count": 0,
+        "warning_count": 0,
+        "broken_count": 0,
+        "broken_links": [],
+        "warning_links": [],
+    }
+
+    seen_urls: set[str] = set()
+    candidates: list[dict[str, str]] = []
+    for link in links_all:
+        href = link.get("href")
+        if not href or href in seen_urls:
+            continue
+        seen_urls.add(href)
+        if urlparse(href).scheme not in {"http", "https"}:
+            continue
+        candidates.append(link)
+        if len(candidates) >= max_links:
+            break
+
+    if not candidates:
+        return summary
+
+    summary["checked"] = True
+    for link in candidates:
+        href = link["href"]
+        status_code = None
+        detail = ""
+        try:
+            response = requests.head(
+                href,
+                headers=HEADERS,
+                timeout=LIVE_LINK_CHECK_TIMEOUT,
+                allow_redirects=True,
+            )
+            status_code = response.status_code
+            checked_with = "HEAD"
+            if status_code in {405, 501}:
+                response = requests.get(
+                    href,
+                    headers=HEADERS,
+                    timeout=LIVE_LINK_CHECK_TIMEOUT,
+                    allow_redirects=True,
+                    stream=True,
+                )
+                status_code = response.status_code
+                checked_with = "GET"
+            detail = f"{checked_with} {status_code}"
+        except requests.exceptions.RequestException as exc:
+            detail = str(exc)
+
+        summary["checked_count"] += 1
+        link_result = {
+            "href": href,
+            "type": link.get("type", "other"),
+            "status_code": status_code,
+            "detail": detail,
+        }
+
+        if status_code is None or status_code >= 400 and status_code not in {403, 429}:
+            summary["broken_count"] += 1
+            summary["broken_links"].append(link_result)
+        elif status_code in {403, 429}:
+            summary["warning_count"] += 1
+            summary["warning_links"].append(link_result)
+        else:
+            summary["healthy_count"] += 1
+
+    return summary
 
 
 def analyze_meta_tags(soup, url):
@@ -469,7 +612,7 @@ def analyze_on_page_content(soup, meta_data, page_url):
     return content_data, content_score
 
 
-def analyze_links(soup, base_url):
+def analyze_links(soup, base_url, validate_live=False, max_live_checks=MAX_LIVE_LINK_CHECKS):
     link_data = {
         "internal": [],
         "external": [],
@@ -477,6 +620,15 @@ def analyze_links(soup, base_url):
         "external_count": 0,
         "anchor_texts": Counter(),
         "links_all": [],
+        "live_status": {
+            "checked": False,
+            "checked_count": 0,
+            "healthy_count": 0,
+            "warning_count": 0,
+            "broken_count": 0,
+            "broken_links": [],
+            "warning_links": [],
+        },
     }
     scoring = {"points": 0, "max_points": 15}
     base_domain = get_domain(base_url)
@@ -511,6 +663,12 @@ def analyze_links(soup, base_url):
 
         link_data["links_all"].append(link_info)
 
+    if validate_live:
+        link_data["live_status"] = validate_live_link_targets(
+            link_data["links_all"],
+            max_links=max_live_checks,
+        )
+
     total_links = link_data["internal_count"] + link_data["external_count"]
     if total_links > 0:
         scoring["points"] += 5
@@ -525,7 +683,15 @@ def analyze_links(soup, base_url):
     return link_data, link_score
 
 
-def analyze_technical_seo(url, soup, load_time, meta_data, response_headers=None, is_html_document=True):
+def analyze_technical_seo(
+    url,
+    soup,
+    load_time,
+    meta_data,
+    html_content,
+    response_headers=None,
+    is_html_document=True,
+):
     tech_data = {
         "robots_txt": {"status": "Not Checked", "content": None, "url": None},
         "sitemap_xml": {"status": "Not Checked", "url": None, "found_in_robots": False},
@@ -534,6 +700,11 @@ def analyze_technical_seo(url, soup, load_time, meta_data, response_headers=None
         "mobile_friendly": {"status": "Not Checked", "reason": ""},
         "https_status": "info",
         "schema_markup": {"present": False, "types": [], "details": []},
+        "performance_hints": inspect_page_resources(
+            html_content,
+            soup,
+            response_headers=response_headers,
+        ),
         "indexability": evaluate_indexability(
             url,
             meta_data,
@@ -666,6 +837,11 @@ def analyze_technical_seo(url, soup, load_time, meta_data, response_headers=None
     else:
         tech_data["schema_markup"]["present"] = False
 
+    if tech_data["performance_hints"]["status"] == "good":
+        scoring["points"] += 3
+    elif tech_data["performance_hints"]["status"] == "warning":
+        scoring["points"] += 1
+
     tech_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
     return tech_data, tech_score, warnings
 
@@ -752,6 +928,26 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
         issues.append(build_issue("links", "medium", "No internal links were detected.", recommendation="Link to relevant pages on the same site."))
     if link_data["anchor_texts"]["[Empty Anchor]"] > 0:
         issues.append(build_issue("links", "medium", "Some links have empty anchor text.", evidence={"empty_anchor_count": link_data["anchor_texts"]["[Empty Anchor]"]}, recommendation="Ensure linked elements have descriptive accessible names."))
+    if link_data["live_status"]["checked"] and link_data["live_status"]["broken_count"] > 0:
+        issues.append(
+            build_issue(
+                "links",
+                "high",
+                "Broken links were detected in the live link check sample.",
+                evidence={"broken_links": link_data["live_status"]["broken_links"][:5]},
+                recommendation="Update or remove broken links so crawlers and users do not hit dead pages.",
+            )
+        )
+    if link_data["live_status"]["checked"] and link_data["live_status"]["warning_count"] > 0:
+        issues.append(
+            build_issue(
+                "links",
+                "low",
+                "Some sampled links returned restricted or rate-limited responses.",
+                evidence={"warning_links": link_data["live_status"]["warning_links"][:5]},
+                recommendation="Review those links manually to confirm they are intentionally protected.",
+            )
+        )
 
     if tech_data["https_status"] != "good":
         issues.append(build_issue("technical", "high", "Page is not using HTTPS.", recommendation="Serve the page over HTTPS."))
@@ -761,22 +957,56 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
         issues.append(build_issue("technical", "low", "Sitemap was not detected in common locations.", evidence={"status": tech_data["sitemap_xml"]["status"]}, recommendation="Expose a sitemap and reference it from robots.txt."))
     if not tech_data["schema_markup"]["present"]:
         issues.append(build_issue("technical", "low", "Valid schema markup was not detected.", recommendation="Add valid JSON-LD where it adds search value."))
+    if tech_data["performance_hints"]["status"] == "bad":
+        issues.append(
+            build_issue(
+                "technical",
+                "medium",
+                "Page health signals suggest a heavy response or DOM.",
+                evidence={"notes": tech_data["performance_hints"]["notes"]},
+                recommendation="Reduce HTML weight, script volume, or DOM complexity to improve crawl and render efficiency.",
+            )
+        )
+    elif tech_data["performance_hints"]["status"] == "warning":
+        issues.append(
+            build_issue(
+                "technical",
+                "low",
+                "Page health signals show moderate HTML or DOM bloat.",
+                evidence={"notes": tech_data["performance_hints"]["notes"]},
+                recommendation="Monitor page weight and DOM size before they become a rendering bottleneck.",
+            )
+        )
 
     severity_rank = {"high": 0, "medium": 1, "low": 2}
     issues.sort(key=lambda issue: (severity_rank.get(issue["severity"], 3), issue["category"], issue["message"]))
     return issues
 
 
-def analyze_html_document(html_content, url, load_time=None, response_headers=None, is_html_document=True) -> AnalysisResult:
+def analyze_html_document(
+    html_content,
+    url,
+    load_time=None,
+    response_headers=None,
+    is_html_document=True,
+    validate_live_links=False,
+    max_live_checks=MAX_LIVE_LINK_CHECKS,
+) -> AnalysisResult:
     soup = parse_html(html_content)
     meta_data, _ = analyze_meta_tags(soup, url)
     content_data, _ = analyze_on_page_content(soup, meta_data, url)
-    link_data, _ = analyze_links(soup, url)
+    link_data, _ = analyze_links(
+        soup,
+        url,
+        validate_live=validate_live_links,
+        max_live_checks=max_live_checks,
+    )
     tech_data, _, warnings = analyze_technical_seo(
         url,
         soup,
         load_time,
         meta_data,
+        html_content,
         response_headers=response_headers,
         is_html_document=is_html_document,
     )
@@ -808,7 +1038,7 @@ def analyze_html_document(html_content, url, load_time=None, response_headers=No
     }
 
 
-def analyze_url(url, fetch_mode="auto"):
+def analyze_url(url, fetch_mode="auto", validate_live_links=False, max_live_checks=MAX_LIVE_LINK_CHECKS):
     selected_mode = (fetch_mode or "auto").lower()
     if selected_mode not in {"auto", "static", "rendered"}:
         raise ValueError("fetch_mode must be one of: auto, static, rendered")
@@ -859,6 +1089,8 @@ def analyze_url(url, fetch_mode="auto"):
         load_time=load_time,
         response_headers=response_headers,
         is_html_document="text/html" in content_type,
+        validate_live_links=validate_live_links,
+        max_live_checks=max_live_checks,
     )
     warnings.extend(analysis_results["warnings"])
     combined_results = dict(analysis_results)

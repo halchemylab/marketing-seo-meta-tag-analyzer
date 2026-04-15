@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from seo_analysis import analyze_html_document, analyze_url, should_attempt_rendered_fetch
+from seo_analysis import analyze_html_document, analyze_links, analyze_url, should_attempt_rendered_fetch
+from seo_utils import parse_html
 
 
 BASE_URL = "https://example.com/page"
@@ -261,6 +262,44 @@ class SeoAnalysisTests(unittest.TestCase):
         self.assertEqual(previews["open_graph"]["title"], "Social title")
         self.assertEqual(previews["twitter"]["title"], "Social title")
         self.assertEqual(previews["twitter"]["card"], "summary")
+
+    @patch("seo_analysis.requests.get")
+    @patch("seo_analysis.requests.head")
+    def test_live_link_validation_detects_broken_links(self, mock_head, mock_get):
+        html = """
+<!doctype html>
+<html>
+<body>
+  <a href="https://example.com/healthy">Healthy</a>
+  <a href="https://example.com/missing">Missing</a>
+</body>
+</html>
+"""
+
+        def head_side_effect(url, **kwargs):
+            response = unittest.mock.Mock()
+            if url.endswith("/missing"):
+                response.status_code = 404
+            else:
+                response.status_code = 200
+            return response
+
+        mock_head.side_effect = head_side_effect
+        mock_get.return_value = unittest.mock.Mock(status_code=404)
+
+        link_data, _ = analyze_links(parse_html(html), BASE_URL, validate_live=True, max_live_checks=5)
+
+        self.assertTrue(link_data["live_status"]["checked"])
+        self.assertEqual(link_data["live_status"]["broken_count"], 1)
+        self.assertEqual(link_data["live_status"]["broken_links"][0]["href"], "https://example.com/missing")
+
+    def test_performance_hints_are_included_in_technical_results(self):
+        results = analyze_html_document(HTML_HOMEPAGE, "https://example.com/", load_time=1.5)
+        hints = results["tech_data"]["performance_hints"]
+
+        self.assertIn("html_size_kb", hints)
+        self.assertIn("dom_elements", hints)
+        self.assertIn(hints["status"], {"good", "warning", "bad"})
 
     def test_should_attempt_rendered_fetch_detects_client_rendered_shell(self):
         html = """

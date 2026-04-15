@@ -3,6 +3,7 @@ from html import escape
 import streamlit as st
 
 from seo_analysis import GOOD_READABILITY_THRESHOLD, MAX_KEYWORDS_TO_SHOW, analyze_url, is_valid_url
+from seo_utils import MAX_LIVE_LINK_CHECKS
 from seo_audit import run_site_audit
 from seo_storage import (
     add_monitor,
@@ -388,6 +389,42 @@ def render_single_page_results(url_input, results):
 
         total_links = link_data["internal_count"] + link_data["external_count"]
         if total_links > 0:
+            live_status = link_data["live_status"]
+            st.subheader("Live Link Check")
+            if live_status["checked"]:
+                col_live_1, col_live_2, col_live_3 = st.columns(3)
+                with col_live_1:
+                    display_metric_card("Links Checked", live_status["checked_count"], "info")
+                with col_live_2:
+                    display_metric_card(
+                        "Broken Links",
+                        live_status["broken_count"],
+                        "bad" if live_status["broken_count"] else "good",
+                    )
+                with col_live_3:
+                    display_metric_card(
+                        "Restricted / Rate Limited",
+                        live_status["warning_count"],
+                        "warning" if live_status["warning_count"] else "good",
+                    )
+                st.caption(
+                    f"Live validation checks a capped sample of up to {MAX_LIVE_LINK_CHECKS} unique HTTP links."
+                )
+                if live_status["broken_links"]:
+                    with st.expander(f"View Broken Links ({live_status['broken_count']})", expanded=False):
+                        for item in live_status["broken_links"]:
+                            label = item["detail"] or "Request failed"
+                            st.markdown(f"- `{item['href']}` ({label})")
+                if live_status["warning_links"]:
+                    with st.expander(
+                        f"View Restricted / Rate-Limited Links ({live_status['warning_count']})",
+                        expanded=False,
+                    ):
+                        for item in live_status["warning_links"]:
+                            st.markdown(f"- `{item['href']}` ({item['detail']})")
+            else:
+                st.info("Live link validation was not enabled for this run.")
+
             with st.expander(f"View Internal Links ({link_data['internal_count']})", expanded=False):
                 if link_data["internal"]:
                     for index, link in enumerate(link_data["internal"]):
@@ -430,7 +467,6 @@ def render_single_page_results(url_input, results):
             else:
                 st.info("No anchor text data to analyze.")
 
-            st.info(f"{get_status_icon('info')} Note: This tool does not perform live checks for broken links due to performance reasons.")
         else:
             st.info("No internal or external links found on the page.")
 
@@ -471,6 +507,16 @@ def render_single_page_results(url_input, results):
             st.markdown(f"**{get_status_icon(lt_status)} Server Fetch Time:** {lt_text} ({lt_desc})")
             st.caption("This is a server-side fetch measurement, not a Core Web Vitals or real-user performance metric.")
 
+            performance_hints = tech_data["performance_hints"]
+            st.markdown(
+                f"**{get_status_icon(performance_hints['status'])} Page Health Snapshot:** "
+                f"{performance_hints['html_size_kb']:.1f} KB HTML, "
+                f"{performance_hints['dom_elements']} DOM elements, "
+                f"{performance_hints['script_count']} external scripts"
+            )
+            for note in performance_hints["notes"]:
+                st.caption(note)
+
             mf_status = tech_data["mobile_friendly"]["status"]
             mf_text = "Responsive Viewport Detected" if mf_status == "good" else ("Viewport Needs Review" if mf_status == "warning" else "No Responsive Viewport Signal")
             st.markdown(f"**{get_status_icon(mf_status)} Mobile Viewport Hint:** {mf_text}")
@@ -492,6 +538,16 @@ def render_single_page_results(url_input, results):
             st.markdown(f"**{sm_icon} sitemap.xml Status:** {sm_status} {found_method}")
             if tech_data["sitemap_xml"]["url"]:
                 st.caption(f"Checked: `{tech_data['sitemap_xml']['url']}`")
+
+            resource_rows = [{
+                "HTML Size (KB)": tech_data["performance_hints"]["html_size_kb"],
+                "Transfer Size (KB)": tech_data["performance_hints"]["transfer_size_kb"] or "",
+                "DOM Elements": tech_data["performance_hints"]["dom_elements"],
+                "External Scripts": tech_data["performance_hints"]["script_count"],
+                "Stylesheets": tech_data["performance_hints"]["stylesheet_count"],
+                "Images": tech_data["performance_hints"]["image_count"],
+            }]
+            st.dataframe(resource_rows, use_container_width=True)
 
             sc_present = tech_data["schema_markup"]["present"]
             st.markdown(
@@ -767,6 +823,11 @@ analysis_mode = st.selectbox(
 
 if scope == "Single Page":
     url_input = st.text_input("Enter URL (e.g., https://www.example.com):", key="url_input")
+    validate_live_links = st.checkbox(
+        "Enable live broken-link checks",
+        value=True,
+        help=f"Checks up to {MAX_LIVE_LINK_CHECKS} unique HTTP links. Slower, but more realistic than a static-only audit.",
+    )
     if st.button("Analyze URL", key="analyze_button"):
         if not url_input:
             st.warning("Please enter a URL.")
@@ -774,13 +835,22 @@ if scope == "Single Page":
             st.error("Invalid URL format. Please include 'http://' or 'https://'.")
         else:
             with st.spinner(f"Fetching and analyzing {url_input}... This may take a moment."):
-                results = analyze_url(url_input, fetch_mode=analysis_mode[0])
+                results = analyze_url(
+                    url_input,
+                    fetch_mode=analysis_mode[0],
+                    validate_live_links=validate_live_links,
+                )
 
             if results["fetch_error"]:
                 st.error(results["fetch_error"])
                 st.stop()
 
-            record = build_single_page_scan_record(url_input, results, analysis_mode[0])
+            record = build_single_page_scan_record(
+                url_input,
+                results,
+                analysis_mode[0],
+                validate_live_links=validate_live_links,
+            )
             persist_scan(record, "single_results", results)
 
     if st.session_state.get("single_results"):
