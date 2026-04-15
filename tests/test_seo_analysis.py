@@ -245,6 +245,23 @@ class SeoAnalysisTests(unittest.TestCase):
         results = analyze_html_document(HTML_WITH_LOW_VALUE_META_ONLY, BASE_URL, load_time=1.5)
         self.assertLess(results["meta_score"], 30)
 
+    def test_search_preview_is_built_from_page_metadata(self):
+        results = analyze_html_document(HTML_HOMEPAGE, "https://example.com/", load_time=1.5)
+        preview = results["meta_data"]["search_preview"]
+
+        self.assertEqual(preview["display_url"], "example.com/")
+        self.assertEqual(preview["title"], "Example Platform for SEO Teams")
+        self.assertFalse(preview["title_truncated"])
+        self.assertFalse(preview["description_truncated"])
+
+    def test_social_preview_falls_back_when_twitter_tags_are_missing(self):
+        results = analyze_html_document(HTML_WITH_LOW_VALUE_META_ONLY, BASE_URL, load_time=1.5)
+        previews = results["meta_data"]["social_previews"]
+
+        self.assertEqual(previews["open_graph"]["title"], "Social title")
+        self.assertEqual(previews["twitter"]["title"], "Social title")
+        self.assertEqual(previews["twitter"]["card"], "summary")
+
     def test_should_attempt_rendered_fetch_detects_client_rendered_shell(self):
         html = """
 <!doctype html>

@@ -1,3 +1,5 @@
+from html import escape
+
 import streamlit as st
 
 from seo_analysis import GOOD_READABILITY_THRESHOLD, MAX_KEYWORDS_TO_SHOW, analyze_url, is_valid_url
@@ -47,6 +49,48 @@ def render_priority_fixes(issues):
         )
     st.caption("These recommendations are generated from validated checks and heuristic rules in the current analyzer.")
     st.markdown("---")
+
+
+def render_search_preview(preview):
+    st.markdown(
+        f"""
+        <div style="border:1px solid #dfe1e5;border-radius:12px;padding:16px;background:#ffffff;">
+            <div style="color:#1a0dab;font-size:22px;line-height:1.3;font-weight:500;">
+                {escape(preview["title_display"])}
+            </div>
+            <div style="color:#188038;font-size:14px;margin-top:4px;">
+                {escape(preview["display_url"])}
+            </div>
+            <div style="color:#4d5156;font-size:14px;margin-top:8px;line-height:1.5;">
+                {escape(preview["description_display"])}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Title: {preview['title_length']} chars"
+        f"{' (likely truncated)' if preview['title_truncated'] else ''} | "
+        f"Description: {preview['description_length']} chars"
+        f"{' (likely truncated)' if preview['description_truncated'] else ''}"
+    )
+
+
+def render_social_preview_card(preview, platform_key):
+    image_url = preview.get("image")
+    if image_url:
+        st.image(image_url, use_container_width=True)
+    else:
+        st.caption("No preview image found.")
+
+    st.markdown(f"**{preview['label']}**")
+    if platform_key == "twitter":
+        st.caption(f"Card type: `{preview.get('card', 'summary')}`")
+    else:
+        st.caption(preview.get("site_name") or preview.get("url") or "")
+    st.markdown(f"**{preview['title']}**")
+    st.write(preview["description"])
+    st.caption(preview.get("url") or "")
 
 
 def render_single_page_results(url_input, results):
@@ -112,6 +156,10 @@ def render_single_page_results(url_input, results):
     with tab_meta:
         st.subheader("Meta Tag Analysis")
         st.markdown("These tags tell search engines and social media platforms about your page.")
+
+        st.subheader("Search Result Preview")
+        st.caption("A quick visual check of how the current title and description may appear in search results.")
+        render_search_preview(meta_data["search_preview"])
 
         col_m1, col_m2 = st.columns(2)
         with col_m1:
@@ -181,6 +229,14 @@ def render_single_page_results(url_input, results):
         st.markdown(
             "These tags control how your page looks when shared on platforms like Facebook and Twitter."
         )
+        social_previews = meta_data.get("social_previews", {})
+        preview_col_1, preview_col_2 = st.columns(2)
+        with preview_col_1:
+            render_social_preview_card(social_previews["open_graph"], "open_graph")
+        with preview_col_2:
+            render_social_preview_card(social_previews["twitter"], "twitter")
+
+        st.markdown("---")
         col_s1, col_s2 = st.columns(2)
         with col_s1:
             st.markdown("**Open Graph (Facebook, LinkedIn, etc.)**")

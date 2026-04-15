@@ -1,4 +1,5 @@
 import json
+from html import escape
 from collections import Counter
 from urllib.parse import urljoin, urlparse
 
@@ -100,6 +101,68 @@ def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_do
     return indexability
 
 
+def normalize_preview_text(text: str | None) -> str:
+    if not text:
+        return ""
+    return " ".join(text.split())
+
+
+def shorten_preview_text(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max_length - 1].rstrip()}…"
+
+
+def build_search_preview(meta_data: dict[str, str | list | None], page_url: str) -> dict[str, str | int | bool]:
+    parsed_url = urlparse(meta_data.get("canonical") or page_url)
+    display_path = parsed_url.path.rstrip("/") or "/"
+    display_url = f"{parsed_url.netloc}{display_path}"
+    title = normalize_preview_text(meta_data.get("title")) or parsed_url.netloc or page_url
+    description = (
+        normalize_preview_text(meta_data.get("description"))
+        or "No meta description provided. Search engines may rewrite this snippet."
+    )
+    return {
+        "title": title,
+        "title_display": shorten_preview_text(title, TITLE_MAX_LENGTH),
+        "title_length": len(title),
+        "title_truncated": len(title) > TITLE_MAX_LENGTH,
+        "description": description,
+        "description_display": shorten_preview_text(description, DESCRIPTION_MAX_LENGTH),
+        "description_length": len(description),
+        "description_truncated": len(description) > DESCRIPTION_MAX_LENGTH,
+        "display_url": display_url,
+    }
+
+
+def build_social_previews(meta_data: dict[str, str | list | None], page_url: str) -> dict[str, dict[str, str]]:
+    fallback_title = normalize_preview_text(meta_data.get("title")) or urlparse(page_url).netloc or page_url
+    fallback_description = (
+        normalize_preview_text(meta_data.get("description"))
+        or "No share description provided for this page."
+    )
+    fallback_url = meta_data.get("canonical") or page_url
+    fallback_image = meta_data.get("favicon") or ""
+
+    open_graph_preview = {
+        "title": normalize_preview_text(meta_data.get("og:title")) or fallback_title,
+        "description": normalize_preview_text(meta_data.get("og:description")) or fallback_description,
+        "image": meta_data.get("og:image") or meta_data.get("twitter:image") or fallback_image,
+        "url": meta_data.get("og:url") or fallback_url,
+        "site_name": normalize_preview_text(meta_data.get("og:site_name")) or urlparse(fallback_url).netloc,
+        "label": "Open Graph / LinkedIn / Facebook",
+    }
+    twitter_preview = {
+        "title": normalize_preview_text(meta_data.get("twitter:title")) or open_graph_preview["title"],
+        "description": normalize_preview_text(meta_data.get("twitter:description")) or open_graph_preview["description"],
+        "image": meta_data.get("twitter:image") or open_graph_preview["image"],
+        "url": fallback_url,
+        "card": meta_data.get("twitter:card") or "summary",
+        "label": "X / Twitter Card",
+    }
+    return {"open_graph": open_graph_preview, "twitter": twitter_preview}
+
+
 def analyze_meta_tags(soup, url):
     meta_data = {
         "title": None,
@@ -128,6 +191,8 @@ def analyze_meta_tags(soup, url):
         "alternate": [],
         "viewport_status": "missing",
         "indexability": None,
+        "search_preview": {},
+        "social_previews": {},
     }
     scoring = {"points": 0, "max_points": 28}
 
@@ -251,6 +316,9 @@ def analyze_meta_tags(soup, url):
         )
     if meta_data["alternate"]:
         scoring["points"] += 3
+
+    meta_data["search_preview"] = build_search_preview(meta_data, url)
+    meta_data["social_previews"] = build_social_previews(meta_data, url)
 
     meta_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
     return meta_data, meta_score
