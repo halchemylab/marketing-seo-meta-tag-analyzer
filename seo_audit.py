@@ -193,7 +193,12 @@ def build_site_audit_summary(pages: list[dict[str, Any]]) -> dict[str, Any]:
             for value, urls in grouped.items()
             if len(urls) > 1
         ]
-        duplicates.sort(key=lambda item: (-int(item["count"]), str(item["value"])))
+        duplicates.sort(
+            key=lambda item: (
+                -item["count"] if isinstance(item["count"], int) else 0,
+                item["value"] if isinstance(item["value"], str) else "",
+            )
+        )
         return duplicates
 
     pages_missing = {

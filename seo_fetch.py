@@ -84,12 +84,12 @@ def should_attempt_rendered_fetch(html_content: str | bytes | None) -> bool:
     meta_description = soup.find("meta", attrs={"name": "description"})
     body = soup.find("body") or soup
 
-    app_shell_selectors = [
+    app_shell_selectors: list[dict[str, Any]] = [
         {"id": re.compile(r"^(app|root|__next|__nuxt)$", re.I)},
         {"data-reactroot": True},
         {"ng-version": True},
     ]
-    has_app_shell_marker = any(body.find(attrs=dict(selector)) for selector in app_shell_selectors)
+    has_app_shell_marker = any(body.find(attrs=selector) for selector in app_shell_selectors)
 
     scripted_shell_text = body.get_text(" ", strip=True).lower()
     shell_phrases = {

@@ -9,6 +9,12 @@ def _get_status_key(values: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _get_weight(weights: dict[str, int], status: str | None) -> int:
+    if status is None:
+        return 0
+    return weights.get(status, 0)
+
+
 def score_meta_quality(meta_data: dict[str, Any]) -> float:
     score = 0.0
     title_weights = {"good": 25, "short": 10, "long": 10, "missing": 0}
@@ -16,10 +22,10 @@ def score_meta_quality(meta_data: dict[str, Any]) -> float:
     canonical_weights = {"good": 20, "cross_domain": 2, "invalid": 0, "missing": 5}
     viewport_weights = {"good": 10, "partial": 5, "invalid": 0, "missing": 0}
 
-    score += title_weights.get(_get_status_key(meta_data, "title_status"), 0)
-    score += description_weights.get(_get_status_key(meta_data, "description_status"), 0)
-    score += canonical_weights.get(_get_status_key(meta_data, "canonical_status"), 0)
-    score += viewport_weights.get(_get_status_key(meta_data, "viewport_status"), 0)
+    score += _get_weight(title_weights, _get_status_key(meta_data, "title_status"))
+    score += _get_weight(description_weights, _get_status_key(meta_data, "description_status"))
+    score += _get_weight(canonical_weights, _get_status_key(meta_data, "canonical_status"))
+    score += _get_weight(viewport_weights, _get_status_key(meta_data, "viewport_status"))
 
     robots_status = meta_data.get("robots_status")
     if robots_status == "valid":
