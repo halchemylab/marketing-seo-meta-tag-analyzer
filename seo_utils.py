@@ -248,7 +248,7 @@ def get_primary_content_root(soup: BeautifulSoup) -> tuple[Any, str | None]:
         ("section", {"role": "main"}),
     ]
     for tag_name, attrs in primary_selectors:
-        root = soup.find(tag_name, attrs=attrs)
+        root = soup.find(tag_name, attrs=dict(attrs))
         if root:
             return deepcopy(root), tag_name
 
@@ -286,7 +286,7 @@ def assess_title_h1_alignment(title: str | None, h1_text: str | None) -> dict[st
 
 
 def find_duplicate_heading_groups(headings: dict[str, list[str]]) -> list[dict[str, Any]]:
-    counts = Counter()
+    counts: Counter[str] = Counter()
     for heading_values in headings.values():
         for value in heading_values:
             normalized = clean_text(value)

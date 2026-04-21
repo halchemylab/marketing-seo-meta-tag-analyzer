@@ -3,7 +3,7 @@ import time
 from html import unescape
 from typing import Any
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 from seo_utils import (
     HEADERS,
@@ -89,7 +89,7 @@ def should_attempt_rendered_fetch(html_content: str | bytes | None) -> bool:
         {"data-reactroot": True},
         {"ng-version": True},
     ]
-    has_app_shell_marker = any(body.find(attrs=selector) for selector in app_shell_selectors)
+    has_app_shell_marker = any(body.find(attrs=dict(selector)) for selector in app_shell_selectors)
 
     scripted_shell_text = body.get_text(" ", strip=True).lower()
     shell_phrases = {

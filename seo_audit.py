@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
-import requests
+import requests  # type: ignore[import-untyped]
 
 from seo_analysis import analyze_url
 from seo_utils import (
@@ -173,7 +173,7 @@ def summarize_page_result(result: dict[str, Any], requested_url: str) -> dict[st
 
 def build_site_audit_summary(pages: list[dict[str, Any]]) -> dict[str, Any]:
     analyzed_pages = [page for page in pages if not page["fetch_error"]]
-    issue_totals = Counter()
+    issue_totals: Counter[str] = Counter()
     issue_by_page_type: dict[str, Counter[str]] = defaultdict(Counter)
     page_type_counts = Counter(page["page_type"] for page in analyzed_pages)
 
@@ -193,7 +193,7 @@ def build_site_audit_summary(pages: list[dict[str, Any]]) -> dict[str, Any]:
             for value, urls in grouped.items()
             if len(urls) > 1
         ]
-        duplicates.sort(key=lambda item: (-item["count"], item["value"]))
+        duplicates.sort(key=lambda item: (-int(item["count"]), str(item["value"])))
         return duplicates
 
     pages_missing = {

@@ -1,18 +1,25 @@
+from typing import Any
+
 from seo_models import IndexabilityDict
 from seo_utils import GOOD_READABILITY_THRESHOLD, clamp_score
 
 
-def score_meta_quality(meta_data: dict) -> float:
+def _get_status_key(values: dict[str, Any], key: str) -> str | None:
+    value = values.get(key)
+    return value if isinstance(value, str) else None
+
+
+def score_meta_quality(meta_data: dict[str, Any]) -> float:
     score = 0.0
     title_weights = {"good": 25, "short": 10, "long": 10, "missing": 0}
     description_weights = {"good": 20, "short": 8, "long": 8, "missing": 0}
     canonical_weights = {"good": 20, "cross_domain": 2, "invalid": 0, "missing": 5}
     viewport_weights = {"good": 10, "partial": 5, "invalid": 0, "missing": 0}
 
-    score += title_weights.get(meta_data.get("title_status"), 0)
-    score += description_weights.get(meta_data.get("description_status"), 0)
-    score += canonical_weights.get(meta_data.get("canonical_status"), 0)
-    score += viewport_weights.get(meta_data.get("viewport_status"), 0)
+    score += title_weights.get(_get_status_key(meta_data, "title_status"), 0)
+    score += description_weights.get(_get_status_key(meta_data, "description_status"), 0)
+    score += canonical_weights.get(_get_status_key(meta_data, "canonical_status"), 0)
+    score += viewport_weights.get(_get_status_key(meta_data, "viewport_status"), 0)
 
     robots_status = meta_data.get("robots_status")
     if robots_status == "valid":
@@ -43,7 +50,7 @@ def score_meta_quality(meta_data: dict) -> float:
     return clamp_score(score)
 
 
-def score_content_quality(content_data: dict) -> float:
+def score_content_quality(content_data: dict[str, Any]) -> float:
     score = 0.0
     h1_count = len(content_data["headings"].get("h1", []))
     if h1_count == 1:
@@ -99,7 +106,7 @@ def score_content_quality(content_data: dict) -> float:
     return clamp_score(score)
 
 
-def score_link_quality(link_data: dict) -> float:
+def score_link_quality(link_data: dict[str, Any]) -> float:
     total_links = link_data["internal_count"] + link_data["external_count"]
     if total_links == 0:
         return 0.0
@@ -138,7 +145,7 @@ def score_link_quality(link_data: dict) -> float:
     return clamp_score(score)
 
 
-def score_technical_quality(tech_data: dict) -> float:
+def score_technical_quality(tech_data: dict[str, Any]) -> float:
     score = 0.0
     if tech_data["https_status"] == "good":
         score += 25

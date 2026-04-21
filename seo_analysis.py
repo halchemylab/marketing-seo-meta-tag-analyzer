@@ -1,9 +1,10 @@
 import json
-from html import escape
 from collections import Counter
+from html import escape
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
-import requests
+import requests  # type: ignore[import-untyped]
 import textstat
 
 from seo_fetch import (
@@ -60,20 +61,35 @@ from seo_utils import (
 )
 
 
-def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_document=True):
+def _meta_text(meta_data: dict[str, Any], key: str) -> str | None:
+    value = meta_data.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _meta_list(meta_data: dict[str, Any], key: str) -> list[Any]:
+    value = meta_data.get(key)
+    return value if isinstance(value, list) else []
+
+
+def evaluate_indexability(
+    page_url: str,
+    meta_data: dict[str, Any],
+    response_headers: dict[str, Any] | None = None,
+    is_html_document: bool = True,
+) -> IndexabilityDict:
     indexability: IndexabilityDict = {
         "can_be_indexed": True,
         "status": "indexable",
         "blockers": [],
         "warnings": [],
-        "canonical_target": meta_data.get("canonical"),
+        "canonical_target": _meta_text(meta_data, "canonical"),
         "x_robots_tag": [],
     }
 
     x_robots_directives = parse_x_robots_tag(response_headers or {})
     indexability["x_robots_tag"] = x_robots_directives
 
-    meta_robots_directives = set(meta_data.get("robots_directives", []))
+    meta_robots_directives = set(_meta_list(meta_data, "robots_directives"))
     x_robots_directives_set = set(x_robots_directives)
 
     if not is_html_document:
@@ -84,8 +100,8 @@ def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_do
     if "noindex" in x_robots_directives_set or "none" in x_robots_directives_set:
         indexability["blockers"].append("x_robots_noindex")
 
-    canonical_status = meta_data.get("canonical_status")
-    canonical_target = meta_data.get("canonical")
+    canonical_status = _meta_text(meta_data, "canonical_status")
+    canonical_target = _meta_text(meta_data, "canonical")
     if canonical_status == "invalid":
         indexability["blockers"].append("invalid_canonical")
     elif canonical_status == "cross_domain":
@@ -94,7 +110,7 @@ def evaluate_indexability(page_url, meta_data, response_headers=None, is_html_do
         if normalize_url_for_comparison(page_url) != normalize_url_for_comparison(canonical_target):
             indexability["warnings"].append("canonical_points_to_different_same_site_url")
 
-    robots_status = meta_data.get("robots_status")
+    robots_status = _meta_text(meta_data, "robots_status")
     if robots_status == "conflict":
         indexability["warnings"].append("conflicting_meta_robots")
     if "unavailable_after" in meta_robots_directives or "unavailable_after" in x_robots_directives_set:
@@ -121,13 +137,14 @@ def shorten_preview_text(text: str, max_length: int) -> str:
     return f"{text[: max_length - 1].rstrip()}…"
 
 
-def build_search_preview(meta_data: dict[str, str | list | None], page_url: str) -> dict[str, str | int | bool]:
-    parsed_url = urlparse(meta_data.get("canonical") or page_url)
+def build_search_preview(meta_data: dict[str, Any], page_url: str) -> dict[str, str | int | bool]:
+    canonical = _meta_text(meta_data, "canonical")
+    parsed_url = urlparse(canonical or page_url)
     display_path = parsed_url.path.rstrip("/") or "/"
     display_url = f"{parsed_url.netloc}{display_path}"
-    title = normalize_preview_text(meta_data.get("title")) or parsed_url.netloc or page_url
+    title = normalize_preview_text(_meta_text(meta_data, "title")) or parsed_url.netloc or page_url
     description = (
-        normalize_preview_text(meta_data.get("description"))
+        normalize_preview_text(_meta_text(meta_data, "description"))
         or "No meta description provided. Search engines may rewrite this snippet."
     )
     return {
@@ -143,29 +160,29 @@ def build_search_preview(meta_data: dict[str, str | list | None], page_url: str)
     }
 
 
-def build_social_previews(meta_data: dict[str, str | list | None], page_url: str) -> dict[str, dict[str, str]]:
-    fallback_title = normalize_preview_text(meta_data.get("title")) or urlparse(page_url).netloc or page_url
+def build_social_previews(meta_data: dict[str, Any], page_url: str) -> dict[str, dict[str, str]]:
+    fallback_title = normalize_preview_text(_meta_text(meta_data, "title")) or urlparse(page_url).netloc or page_url
     fallback_description = (
-        normalize_preview_text(meta_data.get("description"))
+        normalize_preview_text(_meta_text(meta_data, "description"))
         or "No share description provided for this page."
     )
-    fallback_url = meta_data.get("canonical") or page_url
-    fallback_image = meta_data.get("favicon") or ""
+    fallback_url = _meta_text(meta_data, "canonical") or page_url
+    fallback_image = _meta_text(meta_data, "favicon") or ""
 
     open_graph_preview = {
-        "title": normalize_preview_text(meta_data.get("og:title")) or fallback_title,
-        "description": normalize_preview_text(meta_data.get("og:description")) or fallback_description,
-        "image": meta_data.get("og:image") or meta_data.get("twitter:image") or fallback_image,
-        "url": meta_data.get("og:url") or fallback_url,
-        "site_name": normalize_preview_text(meta_data.get("og:site_name")) or urlparse(fallback_url).netloc,
+        "title": normalize_preview_text(_meta_text(meta_data, "og:title")) or fallback_title,
+        "description": normalize_preview_text(_meta_text(meta_data, "og:description")) or fallback_description,
+        "image": _meta_text(meta_data, "og:image") or _meta_text(meta_data, "twitter:image") or fallback_image,
+        "url": _meta_text(meta_data, "og:url") or fallback_url,
+        "site_name": normalize_preview_text(_meta_text(meta_data, "og:site_name")) or urlparse(fallback_url).netloc,
         "label": "Open Graph / LinkedIn / Facebook",
     }
     twitter_preview = {
-        "title": normalize_preview_text(meta_data.get("twitter:title")) or open_graph_preview["title"],
-        "description": normalize_preview_text(meta_data.get("twitter:description")) or open_graph_preview["description"],
-        "image": meta_data.get("twitter:image") or open_graph_preview["image"],
+        "title": normalize_preview_text(_meta_text(meta_data, "twitter:title")) or open_graph_preview["title"],
+        "description": normalize_preview_text(_meta_text(meta_data, "twitter:description")) or open_graph_preview["description"],
+        "image": _meta_text(meta_data, "twitter:image") or open_graph_preview["image"],
         "url": fallback_url,
-        "card": meta_data.get("twitter:card") or "summary",
+        "card": _meta_text(meta_data, "twitter:card") or "summary",
         "label": "X / Twitter Card",
     }
     return {"open_graph": open_graph_preview, "twitter": twitter_preview}
@@ -232,7 +249,7 @@ def inspect_page_resources(
 
 
 def validate_live_link_targets(links_all: list[dict[str, str]], max_links: int = MAX_LIVE_LINK_CHECKS) -> dict[str, object]:
-    summary = {
+    summary: dict[str, Any] = {
         "checked": False,
         "checked_count": 0,
         "healthy_count": 0,
@@ -306,8 +323,8 @@ def validate_live_link_targets(links_all: list[dict[str, str]], max_links: int =
     return summary
 
 
-def analyze_meta_tags(soup, url):
-    meta_data = {
+def analyze_meta_tags(soup: Any, url: str) -> tuple[dict[str, Any], float]:
+    meta_data: dict[str, Any] = {
         "title": None,
         "title_status": "missing",
         "description": None,
@@ -337,7 +354,7 @@ def analyze_meta_tags(soup, url):
         "search_preview": {},
         "social_previews": {},
     }
-    scoring = {"points": 0, "max_points": 28}
+    scoring: dict[str, float] = {"points": 0.0, "max_points": 28.0}
 
     title_tag = soup.find("title")
     if title_tag and title_tag.string:
@@ -463,14 +480,14 @@ def analyze_meta_tags(soup, url):
     meta_data["search_preview"] = build_search_preview(meta_data, url)
     meta_data["social_previews"] = build_social_previews(meta_data, url)
 
-    meta_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
+    meta_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0.0
     return meta_data, meta_score
 
 
-def analyze_on_page_content(soup, meta_data, page_url):
+def analyze_on_page_content(soup: Any, meta_data: dict[str, Any], page_url: str) -> tuple[dict[str, Any], float]:
     page_type = detect_page_type(soup, page_url)
     target_word_count = PAGE_TYPE_CONTENT_THRESHOLDS.get(page_type, PAGE_TYPE_CONTENT_THRESHOLDS["generic"])
-    content_data = {
+    content_data: dict[str, Any] = {
         "page_type": page_type,
         "target_word_count": target_word_count,
         "primary_content_selector": None,
@@ -485,7 +502,7 @@ def analyze_on_page_content(soup, meta_data, page_url):
         "duplicate_headings": [],
         "primary_content_found": False,
     }
-    scoring = {"points": 0, "max_points": 30}
+    scoring: dict[str, float] = {"points": 0.0, "max_points": 30.0}
 
     heading_tags = soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
     has_h1 = False
@@ -573,7 +590,7 @@ def analyze_on_page_content(soup, meta_data, page_url):
                 content_data["top_keywords"].append((word, count, density))
 
     primary_h1 = content_data["headings"].get("h1", [None])[0]
-    content_data["title_h1_alignment"] = assess_title_h1_alignment(meta_data.get("title"), primary_h1)
+    content_data["title_h1_alignment"] = assess_title_h1_alignment(_meta_text(meta_data, "title"), primary_h1)
     if content_data["title_h1_alignment"]["status"] == "good":
         scoring["points"] += 4
     elif content_data["title_h1_alignment"]["status"] == "partial":
@@ -608,12 +625,17 @@ def analyze_on_page_content(soup, meta_data, page_url):
     else:
         scoring["points"] += 4
 
-    content_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
+    content_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0.0
     return content_data, content_score
 
 
-def analyze_links(soup, base_url, validate_live=False, max_live_checks=MAX_LIVE_LINK_CHECKS):
-    link_data = {
+def analyze_links(
+    soup: Any,
+    base_url: str,
+    validate_live: bool = False,
+    max_live_checks: int = MAX_LIVE_LINK_CHECKS,
+) -> tuple[dict[str, Any], float]:
+    link_data: dict[str, Any] = {
         "internal": [],
         "external": [],
         "internal_count": 0,
@@ -630,7 +652,7 @@ def analyze_links(soup, base_url, validate_live=False, max_live_checks=MAX_LIVE_
             "warning_links": [],
         },
     }
-    scoring = {"points": 0, "max_points": 15}
+    scoring: dict[str, float] = {"points": 0.0, "max_points": 15.0}
     base_domain = get_domain(base_url)
 
     links = soup.find_all("a", href=True)
@@ -679,20 +701,20 @@ def analyze_links(soup, base_url, validate_live=False, max_live_checks=MAX_LIVE_
         elif len(link_data["anchor_texts"]) > 1:
             scoring["points"] += 2
 
-    link_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
+    link_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0.0
     return link_data, link_score
 
 
 def analyze_technical_seo(
-    url,
-    soup,
-    load_time,
-    meta_data,
-    html_content,
-    response_headers=None,
-    is_html_document=True,
-):
-    tech_data = {
+    url: str,
+    soup: Any,
+    load_time: float | None,
+    meta_data: dict[str, Any],
+    html_content: str | bytes,
+    response_headers: dict[str, str] | None = None,
+    is_html_document: bool = True,
+) -> tuple[dict[str, Any], float, list[str]]:
+    tech_data: dict[str, Any] = {
         "robots_txt": {"status": "Not Checked", "content": None, "url": None},
         "sitemap_xml": {"status": "Not Checked", "url": None, "found_in_robots": False},
         "load_time": load_time,
@@ -712,8 +734,8 @@ def analyze_technical_seo(
             is_html_document=is_html_document,
         ),
     }
-    scoring = {"points": 0, "max_points": 27}
-    warnings = []
+    scoring: dict[str, float] = {"points": 0.0, "max_points": 27.0}
+    warnings: list[str] = []
 
     parsed_url = urlparse(url)
     base_url_scheme_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -792,7 +814,7 @@ def analyze_technical_seo(
     else:
         tech_data["load_time_status"] = "error"
 
-    viewport_content = meta_data.get("viewport")
+    viewport_content = _meta_text(meta_data, "viewport")
     if viewport_content:
         viewport_status = validate_viewport_content(viewport_content)
         if viewport_status == "good":
@@ -842,11 +864,16 @@ def analyze_technical_seo(
     elif tech_data["performance_hints"]["status"] == "warning":
         scoring["points"] += 1
 
-    tech_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0
+    tech_score = (scoring["points"] / scoring["max_points"]) * 100 if scoring["max_points"] > 0 else 0.0
     return tech_data, tech_score, warnings
 
 
-def generate_issues(meta_data, content_data, link_data, tech_data):
+def generate_issues(
+    meta_data: dict[str, Any],
+    content_data: dict[str, Any],
+    link_data: dict[str, Any],
+    tech_data: dict[str, Any],
+) -> list[IssueDict]:
     issues: list[IssueDict] = []
     indexability = tech_data["indexability"]
 
@@ -984,13 +1011,13 @@ def generate_issues(meta_data, content_data, link_data, tech_data):
 
 
 def analyze_html_document(
-    html_content,
-    url,
-    load_time=None,
-    response_headers=None,
-    is_html_document=True,
-    validate_live_links=False,
-    max_live_checks=MAX_LIVE_LINK_CHECKS,
+    html_content: str | bytes,
+    url: str,
+    load_time: float | None = None,
+    response_headers: dict[str, str] | None = None,
+    is_html_document: bool = True,
+    validate_live_links: bool = False,
+    max_live_checks: int = MAX_LIVE_LINK_CHECKS,
 ) -> AnalysisResult:
     soup = parse_html(html_content)
     meta_data, _ = analyze_meta_tags(soup, url)
@@ -1038,7 +1065,12 @@ def analyze_html_document(
     }
 
 
-def analyze_url(url, fetch_mode="auto", validate_live_links=False, max_live_checks=MAX_LIVE_LINK_CHECKS):
+def analyze_url(
+    url: str,
+    fetch_mode: str = "auto",
+    validate_live_links: bool = False,
+    max_live_checks: int = MAX_LIVE_LINK_CHECKS,
+) -> dict[str, Any]:
     selected_mode = (fetch_mode or "auto").lower()
     if selected_mode not in {"auto", "static", "rendered"}:
         raise ValueError("fetch_mode must be one of: auto, static, rendered")
