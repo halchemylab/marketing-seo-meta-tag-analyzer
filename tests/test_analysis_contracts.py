@@ -36,6 +36,7 @@ class AnalysisContractTests(unittest.TestCase):
                 "tech_score",
                 "warnings",
                 "issues",
+                "remediation_plan",
                 "overall_score",
             },
         )

@@ -152,6 +152,7 @@ class SeoAnalysisTests(unittest.TestCase):
             "tech_score": 75.0,
             "warnings": [],
             "issues": [],
+            "remediation_plan": {},
             "overall_score": 75.0,
         }
 
@@ -262,6 +263,24 @@ class SeoAnalysisTests(unittest.TestCase):
         self.assertEqual(previews["open_graph"]["title"], "Social title")
         self.assertEqual(previews["twitter"]["title"], "Social title")
         self.assertEqual(previews["twitter"]["card"], "summary")
+
+    def test_remediation_plan_includes_copy_ready_metadata_snippets(self):
+        results = analyze_html_document(HTML_WITH_NAV_AND_FOOTER, BASE_URL, load_time=1.5)
+        plan = results["remediation_plan"]
+
+        self.assertIn("<title>Main heading | example.com</title>", plan["meta_tags_html"])
+        self.assertIn('meta name="description"', plan["meta_tags_html"])
+        self.assertEqual(plan["suggested_h1"], "Main heading")
+        self.assertEqual(plan["suggested_schema_type"], "WebPage")
+        self.assertTrue(plan["action_items"])
+
+    def test_remediation_plan_suggests_alt_text_for_missing_images(self):
+        results = analyze_html_document(HTML_WITH_NAV_AND_FOOTER, BASE_URL, load_time=1.5)
+        alt_suggestions = results["remediation_plan"]["alt_text_suggestions"]
+
+        self.assertEqual(len(alt_suggestions), 1)
+        self.assertEqual(alt_suggestions[0]["src"], "/hero.jpg")
+        self.assertIn("Main heading", alt_suggestions[0]["suggested_alt"])
 
     @patch("seo_analysis.requests.get")
     @patch("seo_analysis.requests.head")

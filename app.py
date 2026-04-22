@@ -94,6 +94,51 @@ def render_social_preview_card(preview, platform_key):
     st.caption(preview.get("url") or "")
 
 
+def render_remediation_plan(plan):
+    st.subheader("Ready-To-Use Fixes")
+    st.caption("These suggestions are generated from the current page analysis. Review them before publishing.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Suggested Title Tag**")
+        st.code(plan["suggested_title"], language="text")
+        st.markdown("**Suggested Meta Description**")
+        st.code(plan["suggested_meta_description"], language="text")
+        st.markdown("**Suggested Primary H1**")
+        st.code(plan["suggested_h1"], language="text")
+    with col2:
+        st.markdown("**Suggested Canonical URL**")
+        st.code(plan["suggested_canonical"], language="text")
+        st.markdown("**Suggested Schema Type**")
+        st.code(plan["suggested_schema_type"], language="text")
+        if plan["broken_link_targets"]:
+            st.markdown("**Broken Links To Update**")
+            for href in plan["broken_link_targets"]:
+                st.markdown(f"- `{href}`")
+
+    st.markdown("**Recommended Action List**")
+    for item in plan["action_items"]:
+        st.markdown(f"- `[{item['severity'].upper()}]` {item['issue']} {item['fix']}")
+
+    st.markdown("**Copy-Ready Meta Tag Snippet**")
+    st.code(plan["meta_tags_html"], language="html")
+
+    st.markdown("**Copy-Ready JSON-LD Snippet**")
+    st.code(plan["schema_json_ld"], language="json")
+
+    if plan["alt_text_suggestions"]:
+        st.markdown("**Suggested Alt Text For Missing Images**")
+        alt_rows = [
+            {"Image": item["src"], "Suggested Alt Text": item["suggested_alt"]}
+            for item in plan["alt_text_suggestions"]
+        ]
+        st.dataframe(alt_rows, use_container_width=True)
+
+    with st.expander("Implementation Notes"):
+        for note in plan["implementation_notes"]:
+            st.markdown(f"- {note}")
+
+
 def render_single_page_results(url_input, results):
     for warning in results["warnings"]:
         st.warning(warning)
@@ -109,6 +154,7 @@ def render_single_page_results(url_input, results):
     tech_score = results["tech_score"]
     overall_score = results["overall_score"]
     issues = results["issues"]
+    remediation_plan = results["remediation_plan"]
     indexability = tech_data["indexability"]
     fetch_strategy = results.get("fetch_strategy", "static")
     render_recommended = results.get("render_recommended", False)
@@ -150,8 +196,8 @@ def render_single_page_results(url_input, results):
 
     st.markdown("---")
 
-    tab_meta, tab_content, tab_links, tab_tech = st.tabs(
-        ["🏷️ Meta & Social", "📝 On-Page Content", "🔗 Links", "⚙️ Technical SEO"]
+    tab_meta, tab_content, tab_links, tab_tech, tab_fixes = st.tabs(
+        ["🏷️ Meta & Social", "📝 On-Page Content", "🔗 Links", "⚙️ Technical SEO", "🛠️ Fixes"]
     )
 
     with tab_meta:
@@ -561,6 +607,9 @@ def render_single_page_results(url_input, results):
         st.info(
             f"{get_status_icon('info')} **Duplicate Content:** This tool checks for a `canonical` tag, which helps prevent duplicate content issues. A full check requires comparing content across multiple URLs, which is beyond the scope of this basic parser."
         )
+
+    with tab_fixes:
+        render_remediation_plan(remediation_plan)
 
 
 def render_duplicate_section(label, groups):

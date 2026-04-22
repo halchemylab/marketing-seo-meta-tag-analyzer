@@ -188,6 +188,193 @@ def build_social_previews(meta_data: dict[str, Any], page_url: str) -> dict[str,
     return {"open_graph": open_graph_preview, "twitter": twitter_preview}
 
 
+def _title_case_slug(value: str) -> str:
+    words = [part for part in value.replace("-", " ").replace("_", " ").split() if part]
+    return " ".join(word.capitalize() for word in words)
+
+
+def _derive_page_topic(page_url: str, meta_data: dict[str, Any], content_data: dict[str, Any]) -> str:
+    primary_h1 = content_data.get("headings", {}).get("h1", [None])[0]
+    title = normalize_preview_text(_meta_text(meta_data, "title"))
+    if primary_h1:
+        return primary_h1
+    if title:
+        return title
+
+    path_parts = [part for part in urlparse(page_url).path.split("/") if part]
+    if path_parts:
+        return _title_case_slug(path_parts[-1])
+    return urlparse(page_url).netloc or page_url
+
+
+def _trim_to_limit(text: str, limit: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    trimmed = compact[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return trimmed or compact[:limit].rstrip(" ,;:-")
+
+
+def suggest_title_tag(page_url: str, meta_data: dict[str, Any], content_data: dict[str, Any]) -> str:
+    primary_h1 = content_data.get("headings", {}).get("h1", [None])[0]
+    title = normalize_preview_text(_meta_text(meta_data, "title"))
+    site_name = urlparse(page_url).netloc.replace("www.", "")
+
+    if primary_h1:
+        candidate = primary_h1
+        if len(candidate) < TITLE_MIN_LENGTH and site_name:
+            candidate = f"{candidate} | {site_name}"
+        return _trim_to_limit(candidate, TITLE_MAX_LENGTH)
+
+    if title:
+        return _trim_to_limit(title, TITLE_MAX_LENGTH)
+
+    topic = _derive_page_topic(page_url, meta_data, content_data)
+    return _trim_to_limit(f"{topic} | {site_name}" if site_name else topic, TITLE_MAX_LENGTH)
+
+
+def suggest_meta_description(page_url: str, meta_data: dict[str, Any], content_data: dict[str, Any]) -> str:
+    description = normalize_preview_text(_meta_text(meta_data, "description"))
+    if DESCRIPTION_MIN_LENGTH <= len(description) <= DESCRIPTION_MAX_LENGTH:
+        return description
+
+    topic = _derive_page_topic(page_url, meta_data, content_data)
+    keywords = [item[0] for item in content_data.get("top_keywords", [])[:2]]
+    page_type = content_data.get("page_type", "page").replace("_", " ")
+    keyword_suffix = ""
+    if keywords:
+        keyword_suffix = f" Includes {', '.join(keywords)} guidance."
+
+    candidate = (
+        f"Learn about {topic} on this {page_type} page."
+        f" Get the key details, next steps, and information users expect before they click through."
+        f"{keyword_suffix}"
+    )
+    return _trim_to_limit(candidate, DESCRIPTION_MAX_LENGTH)
+
+
+def suggest_h1(page_url: str, meta_data: dict[str, Any], content_data: dict[str, Any]) -> str:
+    primary_h1 = content_data.get("headings", {}).get("h1", [None])[0]
+    if primary_h1:
+        return primary_h1
+    title = normalize_preview_text(_meta_text(meta_data, "title"))
+    if title:
+        return _trim_to_limit(title.replace("|", "-"), 70)
+    return _derive_page_topic(page_url, meta_data, content_data)
+
+
+def _suggest_image_alt_text(src: str, page_topic: str) -> str:
+    filename = urlparse(src).path.rsplit("/", 1)[-1]
+    filename = filename.rsplit(".", 1)[0]
+    filename_text = _title_case_slug(filename)
+    if filename_text:
+        return _trim_to_limit(f"{page_topic}: {filename_text}", 125)
+    return _trim_to_limit(f"Illustration for {page_topic}", 125)
+
+
+def build_remediation_plan(
+    page_url: str,
+    meta_data: dict[str, Any],
+    content_data: dict[str, Any],
+    link_data: dict[str, Any],
+    tech_data: dict[str, Any],
+    issues: list[IssueDict],
+) -> dict[str, Any]:
+    suggested_title = suggest_title_tag(page_url, meta_data, content_data)
+    suggested_description = suggest_meta_description(page_url, meta_data, content_data)
+    suggested_h1 = suggest_h1(page_url, meta_data, content_data)
+    suggested_canonical = _meta_text(meta_data, "canonical") or page_url
+    suggested_viewport = "width=device-width, initial-scale=1"
+
+    page_topic = _derive_page_topic(page_url, meta_data, content_data)
+    page_type = content_data.get("page_type", "generic")
+    schema_type = "WebPage"
+    schema_payload: dict[str, Any] = {
+        "@context": "https://schema.org",
+        "@type": schema_type,
+        "name": suggested_title,
+        "url": suggested_canonical,
+        "description": suggested_description,
+    }
+    if page_type == "article":
+        schema_payload["@type"] = "Article"
+        schema_payload["headline"] = suggested_title
+    elif page_type == "homepage":
+        schema_payload["@type"] = "WebSite"
+        schema_payload["name"] = urlparse(page_url).netloc.replace("www.", "") or suggested_title
+    elif page_type == "product":
+        schema_payload["@type"] = "Product"
+        schema_payload["name"] = page_topic
+
+    meta_tags = [
+        f"<title>{escape(suggested_title)}</title>",
+        f'<meta name="description" content="{escape(suggested_description)}">',
+        f'<link rel="canonical" href="{escape(suggested_canonical)}">',
+    ]
+    if meta_data.get("viewport_status") != "good":
+        meta_tags.append(f'<meta name="viewport" content="{suggested_viewport}">')
+    if not meta_data.get("og:title"):
+        meta_tags.append(f'<meta property="og:title" content="{escape(suggested_title)}">')
+    if not meta_data.get("og:description"):
+        meta_tags.append(f'<meta property="og:description" content="{escape(suggested_description)}">')
+    if not meta_data.get("twitter:title"):
+        meta_tags.append(f'<meta name="twitter:title" content="{escape(suggested_title)}">')
+    if not meta_data.get("twitter:description"):
+        meta_tags.append(f'<meta name="twitter:description" content="{escape(suggested_description)}">')
+
+    missing_alt_items = [
+        {
+            "src": item["src"],
+            "suggested_alt": _suggest_image_alt_text(item["src"], page_topic),
+        }
+        for item in content_data.get("image_alt_analysis", {}).get("alt_tags", [])
+        if item.get("status") == "missing"
+    ]
+
+    action_items = []
+    for issue in issues[:6]:
+        action_items.append(
+            {
+                "severity": issue["severity"],
+                "issue": issue["message"],
+                "fix": issue["recommendation"] or "Review this item and apply the suggested change.",
+            }
+        )
+
+    if content_data.get("word_count", 0) < content_data.get("target_word_count", 0):
+        word_gap = content_data["target_word_count"] - content_data["word_count"]
+        action_items.append(
+            {
+                "severity": "medium",
+                "issue": "Content depth is below the current target for this page type.",
+                "fix": f"Add roughly {word_gap} more words of primary content focused on {page_topic}.",
+            }
+        )
+
+    if link_data.get("live_status", {}).get("broken_links"):
+        broken_targets = [item["href"] for item in link_data["live_status"]["broken_links"][:5]]
+    else:
+        broken_targets = []
+
+    return {
+        "suggested_title": suggested_title,
+        "suggested_meta_description": suggested_description,
+        "suggested_h1": suggested_h1,
+        "suggested_canonical": suggested_canonical,
+        "meta_tags_html": "\n".join(meta_tags),
+        "suggested_schema_type": schema_payload["@type"],
+        "schema_json_ld": json.dumps(schema_payload, indent=2),
+        "alt_text_suggestions": missing_alt_items[:5],
+        "broken_link_targets": broken_targets,
+        "action_items": action_items,
+        "implementation_notes": [
+            "Review generated snippets before publishing; these suggestions are based on page content and analyzer heuristics.",
+            "Keep the title unique within the site and align it with the page's main H1 and search intent.",
+            "Use schema only when the chosen type matches the page's real content and required properties can be provided.",
+        ],
+    }
+
+
 def inspect_page_resources(
     html_content: str | bytes,
     soup,
@@ -1043,6 +1230,7 @@ def analyze_html_document(
     link_score = score_link_quality(link_data)
     tech_score = score_technical_quality(tech_data)
     issues = generate_issues(meta_data, content_data, link_data, tech_data)
+    remediation_plan = build_remediation_plan(url, meta_data, content_data, link_data, tech_data, issues)
     overall_score = compute_overall_score(
         meta_score,
         content_score,
@@ -1061,6 +1249,7 @@ def analyze_html_document(
         "tech_score": tech_score,
         "warnings": warnings,
         "issues": issues,
+        "remediation_plan": remediation_plan,
         "overall_score": overall_score,
     }
 

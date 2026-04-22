@@ -29,4 +29,5 @@ class AnalysisResult(TypedDict):
     tech_score: float
     warnings: list[str]
     issues: list[IssueDict]
+    remediation_plan: dict[str, Any]
     overall_score: float
