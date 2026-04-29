@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import seo_storage
-from seo_storage import (
+import seo_analyzer.seo_storage as seo_storage
+from seo_analyzer.seo_storage import (
     add_monitor,
     build_scan_record,
     compare_scan_records,

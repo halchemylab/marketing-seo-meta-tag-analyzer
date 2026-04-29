@@ -7,21 +7,21 @@ from urllib.parse import urljoin, urlparse
 import requests  # type: ignore[import-untyped]
 import textstat
 
-from seo_fetch import (
+from .seo_fetch import (
     fetch_content,
     fetch_content_rendered,
     fetch_content_static,
     should_attempt_rendered_fetch,
 )
-from seo_models import AnalysisResult, IndexabilityDict, IssueDict
-from seo_scoring import (
+from .seo_models import AnalysisResult, IndexabilityDict, IssueDict
+from .seo_scoring import (
     compute_overall_score,
     score_content_quality,
     score_link_quality,
     score_meta_quality,
     score_technical_quality,
 )
-from seo_utils import (
+from .seo_utils import (
     DESCRIPTION_MAX_LENGTH,
     DESCRIPTION_MIN_LENGTH,
     GOOD_LOAD_TIME_THRESHOLD,

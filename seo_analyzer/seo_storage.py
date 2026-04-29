@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from seo_audit import build_site_audit_summary, normalize_url_key, summarize_page_result
+from .seo_audit import build_site_audit_summary, normalize_url_key, summarize_page_result
 
-DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SCAN_HISTORY_PATH = DATA_DIR / "scan_history.json"
 MONITORS_PATH = DATA_DIR / "monitors.json"
 

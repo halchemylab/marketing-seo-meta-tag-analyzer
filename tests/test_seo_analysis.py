@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from seo_analysis import analyze_html_document, analyze_links, analyze_url, should_attempt_rendered_fetch
-from seo_utils import parse_html
+from seo_analyzer.seo_analysis import analyze_html_document, analyze_links, analyze_url, should_attempt_rendered_fetch
+from seo_analyzer.seo_utils import parse_html
 
 
 BASE_URL = "https://example.com/page"
@@ -282,8 +282,8 @@ class SeoAnalysisTests(unittest.TestCase):
         self.assertEqual(alt_suggestions[0]["src"], "/hero.jpg")
         self.assertIn("Main heading", alt_suggestions[0]["suggested_alt"])
 
-    @patch("seo_analysis.requests.get")
-    @patch("seo_analysis.requests.head")
+    @patch("seo_analyzer.seo_analysis.requests.get")
+    @patch("seo_analyzer.seo_analysis.requests.head")
     def test_live_link_validation_detects_broken_links(self, mock_head, mock_get):
         html = """
 <!doctype html>
@@ -341,9 +341,9 @@ class SeoAnalysisTests(unittest.TestCase):
 """
         self.assertTrue(should_attempt_rendered_fetch(html))
 
-    @patch("seo_analysis.analyze_html_document")
-    @patch("seo_analysis.fetch_content_rendered")
-    @patch("seo_analysis.fetch_content_static")
+    @patch("seo_analyzer.seo_analysis.analyze_html_document")
+    @patch("seo_analyzer.seo_analysis.fetch_content_rendered")
+    @patch("seo_analyzer.seo_analysis.fetch_content_static")
     def test_auto_mode_upgrades_to_rendered_fetch_when_shell_detected(
         self,
         mock_fetch_static,
@@ -386,9 +386,9 @@ class SeoAnalysisTests(unittest.TestCase):
         analyzed_html = mock_analyze_html_document.call_args.args[0]
         self.assertEqual(analyzed_html, rendered_html)
 
-    @patch("seo_analysis.analyze_html_document")
-    @patch("seo_analysis.fetch_content_rendered")
-    @patch("seo_analysis.fetch_content_static")
+    @patch("seo_analyzer.seo_analysis.analyze_html_document")
+    @patch("seo_analyzer.seo_analysis.fetch_content_rendered")
+    @patch("seo_analyzer.seo_analysis.fetch_content_static")
     def test_auto_mode_falls_back_to_static_when_rendered_fetch_fails(
         self,
         mock_fetch_static,
@@ -428,8 +428,8 @@ class SeoAnalysisTests(unittest.TestCase):
         analyzed_html = mock_analyze_html_document.call_args.args[0]
         self.assertEqual(analyzed_html, static_html)
 
-    @patch("seo_analysis.analyze_html_document")
-    @patch("seo_analysis.fetch_content_rendered")
+    @patch("seo_analyzer.seo_analysis.analyze_html_document")
+    @patch("seo_analyzer.seo_analysis.fetch_content_rendered")
     def test_rendered_mode_uses_rendered_fetch_directly(self, mock_fetch_rendered, mock_analyze_html_document):
         rendered_html = b"<html><head><title>Rendered page</title></head><body><main><h1>Loaded</h1></main></body></html>"
         mock_fetch_rendered.return_value = (

@@ -78,6 +78,13 @@ playwright install chromium
 streamlit run app.py
 ```
 
+Project layout:
+- `app.py`: Streamlit entrypoint
+- `seo_analyzer/`: analysis, fetching, scoring, audit, storage, and shared models/utilities
+- `tests/`: unit tests and HTML fixtures
+- `data/`: persisted local scan data
+- `logs/`: runtime log output
+
 2. Open your web browser and navigate to the provided local URL (typically http://localhost:8501)
 
 3. Enter any webpage URL to analyze

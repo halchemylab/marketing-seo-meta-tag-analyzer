@@ -5,7 +5,7 @@ from typing import Any
 
 import requests  # type: ignore[import-untyped]
 
-from seo_utils import (
+from .seo_utils import (
     HEADERS,
     RENDER_NETWORK_IDLE_TIMEOUT_MS,
     RENDER_SETTLE_DELAY_MS,

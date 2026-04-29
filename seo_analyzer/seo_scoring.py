@@ -1,7 +1,7 @@
 from typing import Any
 
-from seo_models import IndexabilityDict
-from seo_utils import GOOD_READABILITY_THRESHOLD, clamp_score
+from .seo_models import IndexabilityDict
+from .seo_utils import GOOD_READABILITY_THRESHOLD, clamp_score
 
 
 def _get_status_key(values: dict[str, Any], key: str) -> str | None:

@@ -1,0 +1,1 @@
+"""SEO analyzer package."""

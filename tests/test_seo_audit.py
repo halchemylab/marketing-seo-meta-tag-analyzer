@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from seo_audit import build_site_audit_summary, parse_sitemap_xml, run_site_audit
+from seo_analyzer.seo_audit import build_site_audit_summary, parse_sitemap_xml, run_site_audit
 
 
 class SeoAuditTests(unittest.TestCase):
@@ -67,8 +67,8 @@ class SeoAuditTests(unittest.TestCase):
         self.assertEqual(summary["duplicate_titles"][0]["value"], "Example Home")
         self.assertEqual(summary["top_issues"][0]["message"], "Meta description is missing.")
 
-    @patch("seo_audit.audit_from_url_list")
-    @patch("seo_audit.discover_sitemap_urls")
+    @patch("seo_analyzer.seo_audit.audit_from_url_list")
+    @patch("seo_analyzer.seo_audit.discover_sitemap_urls")
     def test_run_site_audit_prefers_sitemap_results_in_auto_mode(self, mock_discover_sitemap_urls, mock_audit_from_url_list):
         mock_discover_sitemap_urls.return_value = (["https://example.com/", "https://example.com/blog"], [])
         mock_audit_from_url_list.return_value = {

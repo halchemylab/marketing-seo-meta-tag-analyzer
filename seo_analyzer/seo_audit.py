@@ -7,8 +7,8 @@ import xml.etree.ElementTree as ET
 
 import requests  # type: ignore[import-untyped]
 
-from seo_analysis import analyze_url
-from seo_utils import (
+from .seo_analysis import analyze_url
+from .seo_utils import (
     HEADERS,
     REQUEST_TIMEOUT,
     normalize_url_for_comparison,

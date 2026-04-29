@@ -1,8 +1,8 @@
 from pathlib import Path
 import unittest
 
-from seo_analysis import analyze_html_document, should_attempt_rendered_fetch
-from seo_utils import parse_x_robots_tag
+from seo_analyzer.seo_analysis import analyze_html_document, should_attempt_rendered_fetch
+from seo_analyzer.seo_utils import parse_x_robots_tag
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"

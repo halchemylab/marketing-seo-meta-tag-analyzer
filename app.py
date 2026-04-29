@@ -2,10 +2,10 @@ from html import escape
 
 import streamlit as st
 
-from seo_analysis import GOOD_READABILITY_THRESHOLD, MAX_KEYWORDS_TO_SHOW, analyze_url, is_valid_url
-from seo_utils import MAX_LIVE_LINK_CHECKS
-from seo_audit import run_site_audit
-from seo_storage import (
+from seo_analyzer.seo_analysis import GOOD_READABILITY_THRESHOLD, MAX_KEYWORDS_TO_SHOW, analyze_url, is_valid_url
+from seo_analyzer.seo_utils import MAX_LIVE_LINK_CHECKS
+from seo_analyzer.seo_audit import run_site_audit
+from seo_analyzer.seo_storage import (
     add_monitor,
     build_single_page_scan_record,
     build_site_audit_scan_record,
